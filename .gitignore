@@ -2,4 +2,4 @@ bin/
 *.log
 .DS_Store
 .corral/
-corral
+/corral
