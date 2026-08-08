@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="" width="112" height="112">
-</p>
-
-<h1 align="center">Corral</h1>
+<h1 align="center"><img src="docs/assets/logo.png" alt="" width="72" height="72" align="absmiddle">&nbsp;Corral</h1>
 
 <p align="center"><strong>Parallel agents. Isolated branches. Evidence before merge.</strong></p>
 
@@ -17,7 +13,7 @@
 </div>
 
 <p align="center">
-  <a href="docs/brand.md"><picture><source media="(prefers-color-scheme: dark) and (max-width: 900px)" srcset="docs/assets/hero-dark-mobile.png"><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png"><source media="(max-width: 900px)" srcset="docs/assets/hero-light-mobile.png"><img src="docs/assets/hero-light.png" alt="Abstract blue work paths, an amber proof gate, a green accepted path, and ordered ledger marks" width="820"></picture></a>
+  <a href="docs/brand.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png"><img src="docs/assets/hero-light.png" alt="Three blue work lanes converge through an amber proof portal into one green verified output" width="820"></picture></a>
 </p>
 
 Corral is a local control plane for agent work. It turns a goal into a validated

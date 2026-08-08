@@ -8,8 +8,8 @@ Corral is a local control plane for agent work.
 
 Corral's brand is a moving system, not a standalone pictorial logo:
 
-- **Ribbons:** broad blue paths represent isolated work in flight. Their
-  punched counterforms differ because each attempt produces distinct work.
+- **Ribbons:** three broad blue paths represent isolated work in flight. They
+  remain distinct until the proof aperture.
 - **Gate:** one monumental amber aperture represents evidence and operator
   judgment. Amber is the moment work must prove itself.
 - **Output:** one green band represents accepted work moving toward the current
@@ -61,8 +61,8 @@ non-terminal states.
   3D extrusion, realistic materials, neon, glass, or generic SaaS blobs.
 - Avoid literal arrows, flowchart nodes, interfaces, robots, ranch imagery,
   fences, livestock, hats, and rope.
-- Desktop banners use a `3:1` crop. Mobile hero art uses a compact horizontal
-  `4:3` composition rather than shrinking desktop geometry.
+- The primary banner uses one `3:1` geometry at every width. Its large shapes
+  must remain legible when the README column narrows to 320 px.
 - Supply light and dark assets with identical composition and semantic color
   roles.
 
@@ -84,7 +84,6 @@ non-terminal states.
 |---|---|
 | `logo.png` | transparent standalone proof-portal mark |
 | `hero-light.png`, `hero-dark.png` | primary `3:1` campaign banner |
-| `hero-light-mobile.png`, `hero-dark-mobile.png` | recomposed `4:3` hero for narrow README columns |
 | `ledger-light.png`, `ledger-dark.png` | durability and retry section banner |
 | `tui.svg`, `tui-mobile.svg` | deterministic product-state illustration |
 
