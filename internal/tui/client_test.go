@@ -71,13 +71,17 @@ func TestClientAgainstDaemon(t *testing.T) {
 	var created struct{ RunID string }
 	_ = created
 
-	// Detail contains states, attempts, session/worktree once done.
+	// Detail contains states, attempts, session/worktree once done. The
+	// node state flips to done before the attempt row's final update is
+	// committed, so wait for both.
 	var detail *RunDetail
 	for time.Now().Before(deadline) {
 		dd, err := client.GetRun(ctx, runID)
 		if err == nil && dd.States["w1"] == "done" {
-			detail = dd
-			break
+			if atts := dd.Attempts["w1"]; len(atts) == 1 && atts[0].Status == "done" {
+				detail = dd
+				break
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

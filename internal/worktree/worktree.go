@@ -111,7 +111,8 @@ func (m *Manager) CommitWorktree(ctx context.Context, worktree string) error {
 }
 
 // MergeBranch fast-ensures a branch is merged into the main checkout with
-// a non-fast-forward merge commit.
+// a non-fast-forward merge commit. The merge commit uses the corral
+// identity so machines without a global git identity still work.
 func (m *Manager) MergeBranch(ctx context.Context, branch string) error {
 	main, err := m.MainBranch(ctx)
 	if err != nil {
@@ -120,7 +121,9 @@ func (m *Manager) MergeBranch(ctx context.Context, branch string) error {
 	if _, err := m.git(ctx, m.repo, "checkout", "-q", main); err != nil {
 		return err
 	}
-	out, err := m.git(ctx, m.repo, "merge", "--no-ff", "-m", "corral: merge "+branch, branch)
+	out, err := m.git(ctx, m.repo,
+		"-c", "user.name=corral", "-c", "user.email=corral@local",
+		"merge", "--no-ff", "-m", "corral: merge "+branch, branch)
 	if err != nil {
 		return fmt.Errorf("merge %s: %w: %s", branch, err, tail([]byte(out), 400))
 	}
