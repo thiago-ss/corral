@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" width="960" height="460" role="img" aria-label="corral vs single agent benchmarks">
+  <rect width="960" height="460" rx="24" fill="#FAFAF9"/>
+  <text x="32" y="40" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="800" fill="#1C1917">corral vs. doing it by hand</text>
+  <text x="32" y="64" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#78716C">deterministic simulation, synthetic agents — run it yourself with <tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace">go run ./cmd/bench</tspan></text>
+
+  <!-- panel 1: parallel wall time -->
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="32" y="104" font-size="15" font-weight="700" fill="#1C1917">8 independent tasks — wall time (ticks)</text>
+    <!-- bars -->
+    <rect x="32" y="150" width="320" height="34" rx="8" fill="#A8A29E"/>
+    <text x="368" y="174" font-size="14" font-weight="700" fill="#1C1917">81</text>
+    <text x="32" y="144" font-size="12" fill="#78716C">single agent, one at a time</text>
+    <rect x="32" y="206" width="83" height="34" rx="8" fill="#2563EB"/>
+    <text x="130" y="230" font-size="14" font-weight="700" fill="#1C1917">21</text>
+    <text x="32" y="200" font-size="12" fill="#78716C">corral, 4 workers in parallel</text>
+    <text x="200" y="230" font-size="15" font-weight="800" fill="#15803D">3.9x faster</text>
+  </g>
+
+  <!-- panel 2: crash resume -->
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="520" y="104" font-size="15" font-weight="700" fill="#1C1917">crash at 50% done — work re-executed</text>
+    <rect x="520" y="150" width="320" height="34" rx="8" fill="#A8A29E"/>
+    <text x="856" y="174" font-size="14" font-weight="700" fill="#1C1917">81</text>
+    <text x="520" y="144" font-size="12" fill="#78716C">restart from scratch</text>
+    <rect x="520" y="206" width="43" height="34" rx="8" fill="#16A34A"/>
+    <text x="578" y="230" font-size="14" font-weight="700" fill="#1C1917">11</text>
+    <text x="520" y="200" font-size="12" fill="#78716C">corral resumes the unfinished half</text>
+    <text x="660" y="230" font-size="15" font-weight="800" fill="#15803D">7.4x less redo</text>
+  </g>
+
+  <!-- panel 3: gates -->
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="32" y="288" font-size="15" font-weight="700" fill="#1C1917">agents that claim "done" — evidence gates</text>
+    <!-- 10 boxes: 7 green, 3 red -->
+    <g transform="translate(32,310)">
+      <rect x="0" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="38" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="76" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="114" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="152" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="190" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="228" y="0" width="34" height="34" rx="6" fill="#16A34A"/>
+      <rect x="266" y="0" width="34" height="34" rx="6" fill="#DC2626"/>
+      <rect x="304" y="0" width="34" height="34" rx="6" fill="#DC2626"/>
+      <rect x="342" y="0" width="34" height="34" rx="6" fill="#DC2626"/>
+    </g>
+    <text x="32" y="370" font-size="13" fill="#1C1917">7 passed their gate</text>
+    <rect x="180" y="358" width="14" height="14" rx="3" fill="#DC2626"/>
+    <text x="200" y="370" font-size="13" fill="#1C1917">3 said done, failed verification — caught before merge</text>
+    <text x="32" y="396" font-size="12" fill="#78716C">trusting the prose would have merged all 10. the gates merged 7. (scripted demonstration, not a claim about model error rates)</text>
+  </g>
+</svg>

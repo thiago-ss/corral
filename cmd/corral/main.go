@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "update":
 		return updateCmd()
+	case "status":
+		return statusCmd()
 	case "daemon":
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		port := fs.Int("port", 4519, "daemon HTTP port")
@@ -236,6 +239,42 @@ func planTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// statusCmd lists runs through the daemon (the TUI shows the same data).
+func statusCmd() error {
+	return statusCmdWithDir(dirOf(""))
+}
+
+func statusCmdWithDir(dir string) error {
+	key, err := readKey(dir)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client := tui.NewClient(daemonURL(), key)
+	runs, err := client.ListRuns(ctx)
+	if err != nil {
+		return fmt.Errorf("daemon not reachable at %s — start it with corral up: %w", daemonURL(), err)
+	}
+	if len(runs) == 0 {
+		fmt.Println("no runs yet — plan one from OpenCode (corral_plan) or POST /api/runs")
+		return nil
+	}
+	for _, r := range runs {
+		states := make([]string, 0, len(r.States))
+		for id, st := range r.States {
+			states = append(states, id+":"+st)
+		}
+		sort.Strings(states)
+		mark := ""
+		if r.Done {
+			mark = "  ✓"
+		}
+		fmt.Printf("%-28s %-10s %s%s\n", r.ID, r.Status, strings.Join(states, " "), mark)
+	}
+	return nil
 }
 
 // upCmd is the one-command start: initialize if needed, launch the daemon

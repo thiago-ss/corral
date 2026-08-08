@@ -20,6 +20,9 @@ test-live: ## full suite including real-OpenCode integration (needs a model prov
 race: ## deterministic tests under the race detector
 	CORRAL_LIVE=0 $(GO) test ./... -count=1 -p 1 -race
 
+bench: ## deterministic benchmark (README numbers)
+	$(GO) run ./cmd/bench
+
 vet: ## go vet + gofmt check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)

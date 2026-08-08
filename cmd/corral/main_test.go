@@ -277,3 +277,25 @@ func TestVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusCommand(t *testing.T) {
+	// Fake daemon serving one run.
+	payload := `[{"id":"run_1","status":"active","states":{"w1":"running","gate":"pending"},"done":false}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/health" {
+			w.Write([]byte(`{"healthy":true}`))
+			return
+		}
+		w.Write([]byte(payload))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("CORRAL_DAEMON_URL", srv.URL)
+	dir := gitRepo(t)
+	os.MkdirAll(filepath.Join(dir, ".corral"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".corral", "api.key"), []byte("k\n"), 0o600)
+
+	out := captureOutput(t, func() { _ = statusCmdWithDir(dir) })
+	if !strings.Contains(out, "run_1") || !strings.Contains(out, "w1:running") {
+		t.Fatalf("status output wrong:\n%s", out)
+	}
+}
