@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -229,7 +228,7 @@ func TestUpCmdSpawnsHealthyDaemon(t *testing.T) {
 	t.Setenv("CORRAL_BIN", bin)
 
 	// Use a dedicated port to avoid clashing with any live daemon.
-	port := freePort(t)
+	port := freePort()
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	t.Setenv("CORRAL_DAEMON_URL", url)
 	out := captureOutput(t, func() {
@@ -258,16 +257,6 @@ func TestUpCmdSpawnsHealthyDaemon(t *testing.T) {
 	}
 	// Kill it.
 	_ = exec.Command("pkill", "-f", "corral daemon --port "+fmt.Sprint(port)).Run()
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
 
 func TestVersionAtLeast(t *testing.T) {

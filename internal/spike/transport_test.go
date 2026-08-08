@@ -29,7 +29,7 @@ func TestTransportSpike(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(proj) })
 	gitInit(t, proj)
 
-	srv, err := spike.StartServer(ctx, proj, os.Stderr)
+	srv, err := spike.StartServer(ctx, proj, 0, os.Stderr)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}

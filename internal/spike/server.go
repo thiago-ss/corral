@@ -16,17 +16,21 @@ type Server struct {
 	Stderr io.Writer
 }
 
-func StartServer(ctx context.Context, workdir string, stderr io.Writer) (*Server, error) {
+// StartServer starts an opencode serve process. port 0 picks a free port;
+// a fixed port allows restarts on the same URL (daemon watchdog).
+func StartServer(ctx context.Context, workdir string, port int, stderr io.Writer) (*Server, error) {
 	bin := "opencode"
 	var cmd *exec.Cmd
 	var base string
 	for attempt := 0; attempt < 5; attempt++ {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, err
+		if port == 0 {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return nil, err
+			}
+			port = listener.Addr().(*net.TCPAddr).Port
+			listener.Close()
 		}
-		port := listener.Addr().(*net.TCPAddr).Port
-		listener.Close()
 
 		cmd = exec.CommandContext(ctx, bin, "serve", "--port", fmt.Sprint(port), "--hostname", "127.0.0.1")
 		cmd.Dir = workdir

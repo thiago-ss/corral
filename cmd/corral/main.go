@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -97,16 +99,56 @@ func daemonCmd(port int, apiKey string) error {
 	if err != nil {
 		return err
 	}
+	// Capture the signal that triggers shutdown so the log explains why
+	// the daemon exited.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		sig := <-sigCh
+		log.Printf("received %v; shutting down gracefully", sig)
+	}()
+	defer func() {
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("daemon exiting: %v", err)
+		}
+	}()
 
-	// Embedded OpenCode server; the daemon owns its lifecycle.
-	srv, err := spike.StartServer(ctx, dir, os.Stderr)
+	// Embedded OpenCode server on a fixed port so the watchdog can
+	// restart it on the same URL without breaking the adapter clients.
+	servePort := freePort()
+	var ocMu sync.Mutex
+	ocServer, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("start opencode server: %w", err)
 	}
-	defer srv.Stop()
-	log.Printf("opencode server: %s", srv.Base)
+	log.Printf("opencode server: %s", ocServer.Base)
+	defer func() { stopServer(ocServer) }()
+
+	// Watchdog: if the embedded server dies, restart it on the same port.
+	go func() {
+		for {
+			if err := ocServer.Cmd.Wait(); err == nil {
+				log.Printf("opencode server exited cleanly")
+			} else {
+				log.Printf("opencode server exited unexpectedly: %v; restarting", err)
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			time.Sleep(2 * time.Second)
+			ns, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
+			if err != nil {
+				log.Printf("opencode server restart failed: %v", err)
+				return
+			}
+			ocMu.Lock()
+			ocServer = ns
+			ocMu.Unlock()
+			log.Printf("opencode server restarted: %s", ns.Base)
+		}
+	}()
 
 	if err := os.MkdirAll(filepath.Join(dir, ".corral"), 0o755); err != nil {
 		return err
@@ -117,7 +159,7 @@ func daemonCmd(port int, apiKey string) error {
 	}
 	defer st.Close()
 
-	oc := ocx.New(srv.Base, dir)
+	oc := ocx.New(ocServer.Base, dir)
 	drv := ocxadapter.New(oc, ocxadapter.Options{PollInterval: time.Second})
 	defer drv.Close()
 	wtm := worktree.NewManager(dir)
@@ -141,6 +183,25 @@ func daemonCmd(port int, apiKey string) error {
 	}()
 	log.Printf("corral daemon: http://%s (api key %v)", addr, apiKey != "")
 	return server.ListenAndServe()
+}
+
+// stopServer kills an embedded opencode server process.
+func stopServer(s *spike.Server) {
+	if s != nil && s.Cmd != nil && s.Cmd.Process != nil {
+		_ = s.Cmd.Process.Kill()
+		_, _ = s.Cmd.Process.Wait()
+	}
+}
+
+// freePort reserves a free TCP port and returns it (released immediately;
+// fine for local single-process use).
+func freePort() int {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
 func tuiCmd() error {
@@ -213,8 +274,11 @@ func upCmdWithPort(dir string, port int) error {
 	if err != nil {
 		return err
 	}
-	// nohup keeps the daemon alive after the shell exits.
+	// nohup keeps the daemon alive after the shell exits; Setsid gives it
+	// its own session and process group so terminal signals (Ctrl+C,
+	// SIGHUP on tab close) can never reach it.
 	cmd := exec.Command("nohup", bin, "daemon", "--port", fmt.Sprint(port))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CORRAL_DAEMON_KEY="+key, "CORRAL_DAEMON_URL="+url)
 	cmd.Stdout = logFile

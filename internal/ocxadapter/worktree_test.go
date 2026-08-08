@@ -44,7 +44,7 @@ func TestOpenCodeWorktreeMerge(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	srv, err := spike.StartServer(ctx, proj, os.Stderr)
+	srv, err := spike.StartServer(ctx, proj, 0, os.Stderr)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}

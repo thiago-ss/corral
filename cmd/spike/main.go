@@ -26,7 +26,7 @@ func main() {
 	}
 	fmt.Printf("project: %s\n", tmp)
 
-	srv, err := spike.StartServer(ctx, tmp, os.Stderr)
+	srv, err := spike.StartServer(ctx, tmp, 0, os.Stderr)
 	if err != nil {
 		fatal(err)
 	}

@@ -48,7 +48,7 @@ func TestDaemonEndToEndRealOpenCode(t *testing.T) {
 			t.Fatalf("git: %v: %s", err, out)
 		}
 	}
-	srv, err := spike.StartServer(ctx, proj, os.Stderr)
+	srv, err := spike.StartServer(ctx, proj, 0, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestPlannerSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(proj) })
-	srv, err := spike.StartServer(ctx, proj, os.Stderr)
+	srv, err := spike.StartServer(ctx, proj, 0, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}

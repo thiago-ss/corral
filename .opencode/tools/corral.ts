@@ -34,15 +34,23 @@ function roleFor(agent?: string): string {
 
 async function call(path: string, body?: unknown, role?: string) {
   const key = await loadKey()
-  const res = await fetch(`${DAEMON}${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Corral-Role": role ?? "operator",
-      ...(key ? { Authorization: `Bearer ${key}` } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${DAEMON}${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Corral-Role": role ?? "operator",
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    return `error: corral daemon is not running at ${DAEMON}. Start it with: corral up`
+  }
+  if (res.status === 401) {
+    return `error 401: API key mismatch — restart the daemon so it uses .corral/api.key (corral up)`
+  }
   if (!res.ok) {
     return `error ${res.status}: ${await res.text()}`
   }
