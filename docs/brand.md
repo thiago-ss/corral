@@ -21,6 +21,20 @@ The result should feel like an art-directed screenprint: bold at thumbnail
 size, precise without looking like a flowchart, and recognizable without the
 name inside the image.
 
+## Logo: proof portal
+
+The standalone mark compresses the system into one gesture: a cobalt control
+loop opens at an amber proof aperture, then lands as a short green band. Its
+open counterform creates a quiet `C` without adding text to the image.
+
+- Keep the mark upright, text-free, and surrounded by generous clear space.
+- Use it above or beside a native `Corral` wordmark; never bake the wordmark
+  into the asset.
+- Do not recolor individual parts: blue is work, amber is proof, and green is
+  the accepted result.
+- At small sizes, use the mark alone. Do not add grain, outlines, containers,
+  shadows, or secondary symbols.
+
 ## Palette
 
 | Token | Light | Dark | Meaning |
@@ -54,8 +68,8 @@ non-terminal states.
 
 ## Type and technical diagrams
 
-- The primary identifier is the native `Corral` wordmark set by the host
-  interface, not text baked into art.
+- The primary identifier pairs the proof-portal mark with the native `Corral`
+  wordmark set by the host interface; text is never baked into art.
 - Use system sans for prose and system mono for states, commands, IDs, and
   evidence.
 - Keep technical diagrams subordinate to campaign art. Put dense diagrams
@@ -68,10 +82,12 @@ non-terminal states.
 
 | Asset | Role |
 |---|---|
+| `logo.png` | transparent standalone proof-portal mark |
 | `hero-light.png`, `hero-dark.png` | primary `3:1` campaign banner |
 | `hero-light-mobile.png`, `hero-dark-mobile.png` | recomposed `4:3` hero for narrow README columns |
 | `ledger-light.png`, `ledger-dark.png` | durability and retry section banner |
 | `tui.svg`, `tui-mobile.svg` | deterministic product-state illustration |
 
-There is intentionally no standalone pictorial logo. Use the native `Corral`
-name beside or above the banner system.
+Use the native `Corral` name beside or below the standalone mark. Campaign
+banners remain text-free and may appear independently when the page already
+names the product.

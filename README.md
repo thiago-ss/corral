@@ -1,13 +1,14 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="" width="112" height="112">
+</p>
+
 <h1 align="center">Corral</h1>
 
 <p align="center"><strong>Parallel agents. Isolated branches. Evidence before merge.</strong></p>
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/thiago-ss/corral/ci.yml?branch=main&style=flat-square&label=CI&labelColor=191A16&color=1F7A50)](https://github.com/thiago-ss/corral/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/thiago-ss/corral?style=flat-square&labelColor=191A16&color=D8890B)](https://github.com/thiago-ss/corral/releases)
-[![Go](https://img.shields.io/badge/Go-1.26.5-2B63D9?style=flat-square&labelColor=191A16)](https://go.dev)
-[![License](https://img.shields.io/badge/license-MIT-1F7A50?style=flat-square&labelColor=191A16)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/thiago-ss/corral/ci.yml?branch=main&style=flat-square&label=CI&labelColor=191A16&color=1F7A50)](https://github.com/thiago-ss/corral/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/thiago-ss/corral?style=flat-square&labelColor=191A16&color=D8890B)](https://github.com/thiago-ss/corral/releases) [![Go](https://img.shields.io/badge/Go-1.26.5-2B63D9?style=flat-square&labelColor=191A16)](https://go.dev) [![License](https://img.shields.io/badge/license-MIT-1F7A50?style=flat-square&labelColor=191A16)](LICENSE)
 
 [Why Corral](#why-corral) · [Default run](#the-default-run) · [Install](#quick-start) · [Architecture](#how-trust-is-built)
 
