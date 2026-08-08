@@ -280,7 +280,7 @@ func upCmdWithPort(dir string, port int) error {
 	// its own session and process group so terminal signals (Ctrl+C,
 	// SIGHUP on tab close) can never reach it.
 	cmd := exec.Command("nohup", bin, "daemon", "--port", fmt.Sprint(port))
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachedSysProcAttr()
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CORRAL_DAEMON_KEY="+key, "CORRAL_DAEMON_URL="+url)
 	cmd.Stdout = logFile
