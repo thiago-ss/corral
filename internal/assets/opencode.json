@@ -1,0 +1,75 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "corral-orchestrator": {
+      "description": "Corral orchestrator: controls runs and graphs, never edits files or runs arbitrary bash.",
+      "mode": "primary",
+      "prompt": "You are the corral orchestrator. You plan runs, start them, monitor status, approve or reject gates, and steer workers. You never edit files and never run bash commands.",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "corral_plan": "allow",
+        "corral_start": "allow",
+        "corral_status": "allow",
+        "corral_approve": "allow",
+        "corral_reject": "allow",
+        "corral_cancel": "allow",
+        "corral_retry": "allow",
+        "corral_steer": "allow"
+      }
+    },
+    "corral-planner": {
+      "description": "Corral planner: read-only; produces task graphs from goals.",
+      "mode": "primary",
+      "prompt": "You are the corral planner. Analyze the codebase read-only and produce a corral task graph JSON for the user's goal using corral_plan. Never modify files or run commands.",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "corral_plan": "allow"
+      }
+    },
+    "corral-worker": {
+      "description": "Corral worker: implements node objectives with scoped file edits and bash inside its worktree.",
+      "mode": "subagent",
+      "prompt": "You are a corral worker. Implement the objective precisely, staying within your declared write scope. Write clean, minimal changes and verify your output.",
+      "permission": {
+        "edit": "ask",
+        "bash": "ask"
+      }
+    },
+    "corral-reviewer": {
+      "description": "Corral reviewer: read-only analysis plus tests and diffs.",
+      "mode": "subagent",
+      "prompt": "You are a corral reviewer. Inspect the worker's output read-only; you may run tests and inspect diffs, but never modify files.",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git diff*": "allow",
+          "git status*": "allow",
+          "git log*": "allow",
+          "go test*": "allow",
+          "npm test*": "allow",
+          "pytest*": "allow"
+        }
+      }
+    },
+    "corral-merger": {
+      "description": "Corral merger: performs restricted git operations to fold accepted work into main.",
+      "mode": "subagent",
+      "prompt": "You are the corral merger. You only perform git operations to merge accepted branches. Never edit source files.",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git status*": "allow",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "git merge*": "ask",
+          "git checkout*": "ask",
+          "git branch*": "ask"
+        }
+      }
+    }
+  }
+}
