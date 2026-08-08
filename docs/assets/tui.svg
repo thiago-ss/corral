@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 600" width="1080" height="600" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="title">Corral TUI attempt inspection</title>
+  <desc id="desc">The terminal interface shows worker w1 done, its objective, role, write scope, command verification, session, worktree, and exit evidence.</desc>
+  <rect width="1080" height="600" rx="20" fill="#141612"/>
+  <rect x="28" y="28" width="8" height="544" fill="#F2AA2A"/>
+  <g font-family="'SFMono-Regular', 'Cascadia Code', 'Liberation Mono', monospace">
+    <text x="72" y="68" fill="#A3A096" font-size="21">corral tui / inspect</text>
+    <path d="M72 92H1028" stroke="#4B5048" stroke-width="2"/>
+
+    <text x="72" y="146" fill="#78A4FF" font-size="30" font-weight="700">node w1</text>
+    <text x="218" y="146" fill="#57C78B" font-size="30">done</text>
+
+    <text x="72" y="206" fill="#A3A096" font-size="23">objective:</text>
+    <text x="280" y="206" fill="#ECE8DC" font-size="23">write a.txt</text>
+    <text x="72" y="246" fill="#A3A096" font-size="23">role:</text>
+    <text x="280" y="246" fill="#ECE8DC" font-size="23">worker</text>
+    <text x="72" y="286" fill="#A3A096" font-size="23">write scope:</text>
+    <text x="280" y="286" fill="#ECE8DC" font-size="23">a.txt</text>
+    <text x="72" y="326" fill="#A3A096" font-size="23">verification:</text>
+    <text x="280" y="326" fill="#ECE8DC" font-size="23">command  test -f a.txt</text>
+
+    <text x="72" y="386" fill="#A3A096" font-size="22">attempts</text>
+    <text x="92" y="430" fill="#ECE8DC" font-size="23">#1</text>
+    <text x="144" y="430" fill="#57C78B" font-size="23">done</text>
+    <text x="264" y="430" fill="#A3A096" font-size="21">session=ses_x</text>
+    <text x="510" y="430" fill="#A3A096" font-size="21">worktree=/tmp/wt/w1</text>
+    <text x="92" y="472" fill="#A3A096" font-size="21">evidence:</text>
+    <text x="280" y="472" fill="#ECE8DC" font-size="21">{&quot;exit&quot;:0}</text>
+
+    <path d="M72 516H1028" stroke="#4B5048" stroke-width="2"/>
+    <text x="72" y="554" fill="#A3A096" font-size="19">esc back · ↑/↓ navigate · a/r/c/t/s act</text>
+  </g>
+</svg>
