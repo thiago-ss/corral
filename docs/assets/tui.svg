@@ -28,6 +28,6 @@
     <text x="280" y="472" fill="#ECE8DC" font-size="21">{&quot;exit&quot;:0}</text>
 
     <path d="M72 516H1028" stroke="#4B5048" stroke-width="2"/>
-    <text x="72" y="554" fill="#A3A096" font-size="19">esc back · ↑/↓ navigate · a/r/c/t/s act</text>
+    <text x="72" y="554" fill="#A3A096" font-size="21">esc back · ↑/↓ navigate · a/r/c/t/s act</text>
   </g>
 </svg>

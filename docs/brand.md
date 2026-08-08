@@ -4,28 +4,30 @@ Corral is a local control plane for agent work.
 
 **Brand promise:** Parallel agents. Isolated branches. Evidence before merge.
 
-## Idea: the fence ledger
+## Idea: proof ribbons
 
-The visual system joins two product truths:
+Corral's brand is a moving system, not a standalone pictorial logo:
 
-- **Fence:** parallel rails represent isolated worktrees; a gate represents
-  evidence and operator approval; one clean rail leaves toward the current
+- **Ribbons:** broad blue paths represent isolated work in flight. Their
+  punched counterforms differ because each attempt produces distinct work.
+- **Gate:** one monumental amber aperture represents evidence and operator
+  judgment. Amber is the moment work must prove itself.
+- **Output:** one green band represents accepted work moving toward the current
   branch.
-- **Ledger:** ruled lines and numbered events represent the append-only SQLite
-  record that makes a run inspectable and resumable.
+- **Ledger:** a continuous ink band collects stamped impressions. Earlier
+  marks remain when an attempt loops back and resumes.
 
-Keep the metaphor infrastructural. No western illustration, rope, hats, wood,
-or livestock.
+The result should feel like an art-directed screenprint: bold at thumbnail
+size, precise without looking like a flowchart, and recognizable without the
+name inside the image.
 
 ## Palette
 
 | Token | Light | Dark | Meaning |
 |---|---|---|---|
 | paper | `#F3F0E8` | `#141612` | field |
-| raised | `#E7E2D7` | `#1D211C` | grouped region |
 | ink | `#191A16` | `#ECE8DC` | text and primary structure |
 | muted | `#66665E` | `#A3A096` | secondary text |
-| rail | `#B6AFA1` | `#4B5048` | inactive structure |
 | amber | `#D8890B` | `#F2AA2A` | brand and gates only |
 | blue | `#2B63D9` | `#78A4FF` | active work only |
 | green | `#1F7A50` | `#57C78B` | verified outcomes only |
@@ -34,19 +36,42 @@ or livestock.
 Amber is not decoration. Blue never means branding. Green and red never label
 non-terminal states.
 
-## Geometry and type
+## Illustration rules
 
-- Work on an 8 px grid. Use 3 px rails and 6–10 px corner radii.
-- Prefer continuous paths, ruled regions, and open space over card grids.
-- Use sentence case and lowercase labels.
+- Use flat 2D shapes, broad ribbons, hard crop edges, and asymmetric rhythm.
+- Keep banner art text-free. Product name, claims, and metrics stay as native
+  Markdown where they remain searchable, selectable, and accessible.
+- Use only five inks in brand art: paper, ink, blue, amber, and green. Red is
+  reserved for technical failure states outside campaign art.
+- Allow light paper tooth and screenprint grain. Do not use gradients, shadows,
+  3D extrusion, realistic materials, neon, glass, or generic SaaS blobs.
+- Avoid literal arrows, flowchart nodes, interfaces, robots, ranch imagery,
+  fences, livestock, hats, and rope.
+- Desktop banners use a `3:1` crop. Mobile hero art uses a compact horizontal
+  `4:3` composition rather than shrinking desktop geometry.
+- Supply light and dark assets with identical composition and semantic color
+  roles.
+
+## Type and technical diagrams
+
+- The primary identifier is the native `Corral` wordmark set by the host
+  interface, not text baked into art.
 - Use system sans for prose and system mono for states, commands, IDs, and
   evidence.
+- Keep technical diagrams subordinate to campaign art. Put dense diagrams
+  behind disclosure when the surrounding prose already explains the model.
 - SVG text must remain at least 10 px after README scaling. Supply a stacked
   mobile asset when a wide diagram cannot meet that threshold.
-- No external fonts, gradients, filters, shadows, or decorative transparency.
+- No external fonts, filters, or decorative transparency.
 
-## Mark
+## Asset set
 
-Three rails are isolated work. The open bracket is the gate. The single blue
-square is an active attempt crossing the boundary. At small sizes, omit all
-supporting dots and labels; the rails and open gate must remain legible.
+| Asset | Role |
+|---|---|
+| `hero-light.png`, `hero-dark.png` | primary `3:1` campaign banner |
+| `hero-light-mobile.png`, `hero-dark-mobile.png` | recomposed `4:3` hero for narrow README columns |
+| `ledger-light.png`, `ledger-dark.png` | durability and retry section banner |
+| `tui.svg`, `tui-mobile.svg` | deterministic product-state illustration |
+
+There is intentionally no standalone pictorial logo. Use the native `Corral`
+name beside or above the banner system.

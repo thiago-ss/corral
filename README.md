@@ -1,160 +1,216 @@
+<h1 align="center">Corral</h1>
+
+<p align="center"><strong>Parallel agents. Isolated branches. Evidence before merge.</strong></p>
+
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="corral" width="780"/>
+[![CI](https://img.shields.io/github/actions/workflow/status/thiago-ss/corral/ci.yml?branch=main&style=flat-square&label=CI&labelColor=191A16&color=1F7A50)](https://github.com/thiago-ss/corral/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/thiago-ss/corral?style=flat-square&labelColor=191A16&color=D8890B)](https://github.com/thiago-ss/corral/releases)
+[![Go](https://img.shields.io/badge/Go-1.26.5-2B63D9?style=flat-square&labelColor=191A16)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-1F7A50?style=flat-square&labelColor=191A16)](LICENSE)
 
-**durable orchestration for agent runs** — plan a task graph, run parallel agents in isolated worktrees, gate everything with evidence, approve and merge. Crash-safe, auditable, and it survives restarts without redoing work.
+[Why Corral](#why-corral) · [Default run](#the-default-run) · [Install](#quick-start) · [Architecture](#how-trust-is-built)
 
-[![ci](https://github.com/thiago-ss/corral/actions/workflows/ci.yml/badge.svg)](https://github.com/thiago-ss/corral/actions/workflows/ci.yml)
-[![release](https://github.com/thiago-ss/corral/actions/workflows/release.yml/badge.svg)](https://github.com/thiago-ss/corral/actions/workflows/release.yml)
-[![go](https://img.shields.io/badge/go-1.26-blue)](https://go.dev)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/thiago-ss/corral/main/scripts/install.sh | sh
-cd your-repo && corral up
-```
+**[Install and run →](#quick-start)**
 
 </div>
 
----
+<p align="center">
+  <a href="docs/brand.md"><picture><source media="(prefers-color-scheme: dark) and (max-width: 900px)" srcset="docs/assets/hero-dark-mobile.png"><source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png"><source media="(max-width: 900px)" srcset="docs/assets/hero-light-mobile.png"><img src="docs/assets/hero-light.png" alt="Abstract blue work paths, an amber proof gate, a green accepted path, and ordered ledger marks" width="820"></picture></a>
+</p>
 
-## What this is
+Corral is a local control plane for agent work. It turns a goal into a validated
+task graph, schedules OpenCode workers in isolated git worktrees, checks their
+output with machine-readable evidence, records the run in SQLite, and gives the
+operator explicit controls before work lands.
 
-You know the pattern. You hand a task to an agent, it works for a while, and it says "done". Sometimes it is done. Sometimes it touched the wrong files, or "fixed" something that was already fine, or stopped mid-way and forgot to tell you. If the machine restarts, you start over. If you wanted three things done in parallel, you open three terminals and babysit them.
+Corral is not another coding agent. It is the durable pipeline around agents.
 
-**corral is the CI for agent work.** It takes a goal, turns it into a graph of small tasks, runs them in parallel — each in its own git worktree — and refuses to call anything done until an *evidence gate* proves it. Nothing touches `main` until you approve. If the daemon crashes, it picks up exactly where it left off, and it can prove it.
+## Why Corral
 
-It is **not** another agent. The agents are still OpenCode (and later Codex, Claude CLI, whatever). corral is the pipeline around them: plan → parallel work → verification → approval → merge.
+An agent session is good at one interactive task. Corral is for a different
+mode: _deliver this graph of work even if tasks run in parallel, a gate fails,
+or the process restarts._
 
-## How a run looks
+- **Work model:** one conversation → a validated DAG of `agent`, `check`,
+  `human_gate`, and `merge` nodes.
+- **Completion:** model says “done” → command, JSON Schema, or reported-diff
+  evidence passes.
+- **Parallelism:** terminals you coordinate → leased workers in separate
+  branches and worktrees.
+- **Failure:** manually re-prompt → bounded retry after a failed gate.
+- **Restart:** reconstruct context → completed nodes stay done; interrupted
+  attempts restart.
+- **Provenance:** transcript → ordered events, attempts, verdicts, branches,
+  and artifacts.
 
-<img src="docs/assets/pipeline.svg" alt="one goal, one pipeline" width="820"/>
+## The default run
 
-Concretely:
+1. **Plan.** A read-only planner turns the goal into a graph. You review the
+   graph before starting it.
+2. **Run.** Ready agent nodes execute concurrently. Every writing attempt gets
+   its own branch and worktree.
+3. **Verify.** A command, JSON Schema, or default non-empty-diff gate decides
+   whether an attempt is complete. Idle model output is not completion.
+4. **Retry.** Within a live daemon, a failed verdict feeds its reason into the
+   next attempt, within the node's retry limit.
+5. **Approve and land.** The supplied planner is instructed to place a
+   `human_gate` before a no-fast-forward merge into the branch that is checked
+   out when the merge begins.
 
-1. **Plan** — a read-only planner agent turns your goal into a task graph. You read it, change it, approve it.
-2. **Work** — workers run concurrently, each in its own worktree with its own branch. Your working tree stays clean the whole time.
-3. **Verify** — every attempt must pass its gate: a command, a JSON-schema check, a reviewer — or at minimum produce a diff. A session going idle is not a result.
-4. **Approve** — a human gate parks the run until you say yes (or no).
-5. **Merge** — accepted branches are folded into `main`, post-merge checks run, consumed worktrees are cleaned up.
+> **Important:** Human approval is a graph node, not a validator invariant. The
+> supplied planner is instructed to generate the approval path shown above;
+> inspect every graph before running it.
 
-Fail a gate? The node retries automatically — the *reason it failed* is fed back into the next attempt. Exhaust retries? The node fails, its dependents block, and the run waits for you. No silent half-done states.
+## Quick start
 
-<img src="docs/assets/state-machine.svg" alt="a node's life" width="820"/>
+Requirements: Git, OpenCode 1.18+, and macOS or Linux on `amd64` or `arm64`.
 
-## Why this beats "just prompt an agent"
+```sh
+# Install to ~/.local/bin.
+root=https://raw.githubusercontent.com
+repo=thiago-ss/corral
+script=main/scripts/install.sh
+curl -fsSL "$root/$repo/$script" | sh
+corral version
 
-The honest comparison:
+# Initialize + start.
+cd your-repo
+corral up
+```
 
-| | A single agent session | corral |
-|---|---|---|
-| Unit of work | one conversation | a **task graph** with typed nodes (agent, check, merge, human gate) |
-| "Done" means | the model said so | **an evidence gate passed** — command, schema, reviewer, or real diffs |
-| Retries | you re-prompt, hoping | **automatic and bounded**, with the failed gate's feedback injected into the next attempt |
-| Parallel work | you juggle terminals | **fan-out / fan-in**, priority + aging, leases, concurrency limits |
-| Your working tree | the agent edits it directly | **untouched until you approve** — every writer gets its own worktree |
-| Restart | hope you saved the transcript | **exactly-once resume** — completed attempts never re-run |
-| Budgets | watch the bill | per-node and per-run **time / token / cost** budgets, circuit breakers |
-| Supervision | every keystroke, or none | you approve the **decision points**: the graph, the gates, the merge |
-| Audit | a chat log | a full **event log + export**: attempts, sessions, worktrees, content-addressed diffs |
+`corral up` checks the repository, creates `.corral/`, installs the OpenCode
+tool at `.opencode/tools/corral.ts`, merges five Corral agent definitions into
+`opencode.json`, starts the daemon, and runs `corral doctor`. Existing agent
+entries are preserved. Restart OpenCode after the first setup.
 
-## Numbers from the simulation
+Inside OpenCode:
 
-<img src="docs/assets/benchmark.svg" alt="corral vs single agent benchmarks" width="820"/>
+1. Switch to `corral-planner` and ask: `plan a graph to <your goal>`.
+2. Review the returned graph.
+3. Switch to `corral-orchestrator` and ask it to start that graph.
+4. Follow progress with `corral_status`; approve, reject, retry, cancel, or
+   steer nodes when needed.
 
-Those are deterministic — the scheduler runs on a fake clock with scripted agents, so the same numbers come out every time. **Run them yourself:**
+Or follow the same run from the terminal:
+
+```sh
+corral tui
+```
+
+<div align="center">
+  <a href="docs/assets/tui.svg"><picture><source media="(max-width: 900px)" srcset="docs/assets/tui-mobile.svg"><img src="docs/assets/tui.svg" alt="Corral TUI inspecting a completed attempt, its worktree, command gate, and exit evidence" width="960"></picture></a>
+</div>
+
+The TUI exposes the graph, node states, attempts, sessions, worktrees, evidence,
+and operator actions. Worker edits stay in attempt worktrees; initialization
+itself may add the OpenCode tool and agent config to your checkout.
+
+## What counts as evidence
+
+Corral currently wires three completion paths:
+
+- **Command:** run an argv-style command in the attempt worktree and require
+  exit code `0`.
+- **JSON Schema:** validate a declared JSON artifact against a schema.
+- **Default diff:** when no gate is declared, require at least one file diff
+  reported by the driver. Prose alone fails.
+
+The graph schema also contains a reviewer-gate seam, but the production daemon
+does not wire a reviewer implementation yet.
+
+## Proof, not promises
+
+- **3.9× faster wall time:** `81` sequential ticks → `21` with four workers.
+- **7.4× lower simulated time-to-finish after a crash:** `81` ticks for a naive
+  sequential rerun → `11` to resume unfinished work with four workers. This
+  combines persistence with parallel execution.
+- **Evidence rejects bad completion:** `7 / 10` scripted outputs pass; `3` are
+  rejected by their gates.
+
+These numbers come from a deterministic fake-clock simulation with scripted
+agents—not a model-quality benchmark. The `3 / 10` failures are an illustrative
+scenario, not an estimate of how often models are wrong.
 
 ```sh
 make bench     # or: go run ./cmd/bench
 ```
 
-The "3 out of 10 said done but failed verification" panel is a scripted illustration, not a claim about model error rates — but it is exactly the failure mode gates exist for.
+## How trust is built
 
-## Getting started
+<p align="center">
+  <a href="docs/brand.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/ledger-dark.png"><img src="docs/assets/ledger-light.png" alt="Abstract blue paths stamp an ordered ledger while an amber loop suggests retry" width="820"></picture></a>
+</p>
 
-Requirements: `opencode` ≥ 1.18 on your PATH, and a git repository.
+Every scheduler transition leaves an ordered event. Failed verdicts and their
+evidence remain stored when an attempt retries.
+
+- **Isolation:** each writing agent attempt receives a branch and worktree.
+  Declared write scopes that overlap are serialized; write scopes are
+  scheduling hints, not a filesystem sandbox.
+- **Verification:** verdicts are separate from model output. Failed evidence is
+  stored; while the daemon remains up, its reason becomes focused retry
+  feedback.
+- **Durability:** transitions and verdicts append to the SQLite event log with a
+  monotonic per-run sequence. Attempt metadata is maintained in companion
+  tables. On load, the scheduler reconstructs its in-memory tracker from events.
+- **Recovery:** terminal nodes stay terminal. Attempts interrupted in `leased`,
+  `running`, or `verifying` return to `ready` and execute as a new attempt.
+- **Landing:** merge nodes commit accepted worktree changes, merge branches with
+  `--no-ff`, run their post-merge command, and prune consumed worktrees.
+
+OpenCode is the implemented driver. The generic `adapter.Driver` interface is
+the seam for future executors.
+
+## Operations
+
+| Command | Purpose |
+|---|---|
+| `corral status` | List runs through the daemon |
+| `corral tui` | Open the companion dashboard |
+| `corral doctor` | Check OpenCode, Git, daemon, plugin, and config |
+| `corral update` | Install a newer GitHub release after a sanity check |
+| `corral export <runID>` | Print the full audit export |
+
+`status`, `tui`, and `doctor` read the repository key automatically. Until the
+export command does the same, use:
 
 ```sh
-# install
-curl -fsSL https://raw.githubusercontent.com/thiago-ss/corral/main/scripts/install.sh | sh
-corral version
-
-# in your repo — one command does everything:
-corral up
+CORRAL_DAEMON_KEY="$(cat .corral/api.key)" \
+  corral export <runID> > audit.json
 ```
-
-`corral up` checks git, writes `.corral/` (API key, config, log), installs the OpenCode plugin, adds five agent roles (`corral-planner`, `corral-orchestrator`, `corral-worker`, `corral-reviewer`, `corral-merger`) to `opencode.json` — without touching anything you already configured — starts the daemon, and runs `corral doctor`. Restart OpenCode and you're ready.
-
-Then, inside OpenCode:
-
-1. Switch to **corral-planner** (Tab) and say: *"plan a graph to <your goal>"* — it returns a graph JSON. Read it.
-2. Switch to **corral-orchestrator** and say: *"start this run: <the graph>"*.
-3. Follow it with `corral_status`, approve the gate with `corral_approve`, and watch the merge fold the work into main.
-
-Or watch it live in the terminal dashboard:
-
-```sh
-corral tui      # ↑/↓ navigate · enter run · a approve · i inspect · s steer · t retry · c cancel
-```
-
-### Everyday ops
-
-```sh
-corral status                # what's running, through the daemon
-corral doctor                # opencode, git, daemon, plugin, config — one check each
-corral export <runID>        # full audit trail to JSON
-corral update                # self-update from GitHub releases (no downgrades, sanity-checked)
-```
-
-## How it's built
-
-<img src="docs/assets/architecture.svg" alt="corral architecture" width="820"/>
-
-The important pieces:
-
-- **SQLite event log** is the source of truth — every transition, attempt and verdict is an append-only event with a monotonic sequence. "What's the state?" is answered by replaying the log, which is also what makes crash recovery exact.
-- **Leases and a single control loop** — nodes are claimed with expiring leases; one deterministic `Step` does all state changes, so the scheduler is fully testable with a fake clock.
-- **The adapter contract** is generic. OpenCode is the first driver; the same `adapter.Driver` interface is the seam for Codex, Claude CLI, or any future backend.
-- **Verification is a library** (`internal/verify`) — command gates, JSON-schema gates, reviewer gates, and the default rule: no diff, no done.
-- **Worktree isolation** (`internal/worktree`) — branch-per-attempt, content-addressed diff artifacts, scope-collision blocking so writers with overlapping scope never run concurrently.
-- **Roles are enforced twice** — OpenCode's per-agent permissions, and the daemon's own role checks. A worker agent physically cannot start or approve a run.
-
-## Questions people ask
-
-**Is this another agent?** No. corral has no model of its own. The workers are OpenCode sessions. corral decides *who runs, when, in what order, with what proof, and whether it may land*.
-
-**Why not just use Claude Code / Codex / OpenCode directly?** For an interactive session — do. They're great at that. corral is for the other mode: *"take this goal and deliver a verified, merged result, even if I'm not watching and even if the machine restarts."*
-
-**Do I have to write the graph by hand?** No — the planner agent writes it from your goal, and you review it before it starts. You'll edit it once you get picky (that's the point of reviewing).
-
-**What counts as "verified"?** Whatever you say it is: a command that exits 0 (a grep, a test run), a JSON-schema check on a produced artifact, a reviewer agent's approval — or, with no gate declared, at least one real file diff. Prose alone never passes.
-
-**What happens if the daemon crashes mid-run?** It resumes on restart. Completed attempts are never re-executed (tested); interrupted ones are re-run exactly once. The event log replays to the exact same state. `corral up` again and it's back.
-
-**Is my main branch safe?** Workers write only in their own worktrees. Nothing merges until every dependency is done, checks pass, and you approve the gate. Rejection blocks the merge and the run waits.
-
-**Can it run Codex or Claude instead of OpenCode?** The adapter contract is generic; OpenCode is the implemented driver. That's the planned seam.
-
-**What's deliberately NOT included?** Distributed workers, autonomous deployment, graph cycles, self-mutating graphs, knowledge graphs. Single machine, one repository, humans in the loop at the important moments.
 
 ## Development
 
 ```sh
-make test       # deterministic suite — no model, no network, ~15s
-make test-live  # full suite including real-OpenCode integration (needs a provider)
-make race       # deterministic suite under the race detector
-make bench      # the benchmark numbers above
-make vet        # go vet + gofmt
+make test       # deterministic
+make test-live  # real provider
+make race       # race detector
+make bench      # README simulation
+make vet        # vet + format check
 ```
 
-The repo is mostly `internal/`: `sched` (the loop), `store` (SQLite), `graph` (schema + state machine), `verify` (gates), `worktree` (isolation), `ocxadapter` (OpenCode driver), `daemon` (API), `tui` (dashboard). The deterministic tests are the interesting ones — the scheduler is a state machine you can read like a spec.
+The core packages are deliberately small:
 
-## Roadmap
+| Package | Responsibility |
+|---|---|
+| `internal/graph` | graph schema, validation, states, ready computation |
+| `internal/sched` | leases, priority, retries, gates, merge orchestration |
+| `internal/store` | SQLite event log, materialized nodes, attempts, artifacts |
+| `internal/verify` | command, JSON Schema, and diff evidence |
+| `internal/worktree` | branch/worktree lifecycle and diff artifacts |
+| `internal/ocxadapter` | OpenCode sessions and completion reconciliation |
+| `internal/daemon` | control API, planning, role routing, audit export |
+| `internal/tui` | terminal dashboard and operator controls |
 
-- [ ] More drivers (Codex CLI, Claude CLI) behind the adapter contract
-- [ ] Interactive graph editing in the TUI
-- [ ] Run-level dashboards / web panel
-- [ ] Multi-machine workers
+Visual language, color roles, and asset rules live in the
+[`docs/brand.md`](docs/brand.md) brand guide.
+
+## Scope
+
+Corral is currently local, single-machine, single-repository software with one
+implemented executor: OpenCode. Distributed workers, Codex/Claude drivers,
+interactive graph editing, and a web dashboard remain roadmap work.
 
 ## License
 

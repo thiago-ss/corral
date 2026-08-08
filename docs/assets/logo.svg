@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision">
-  <title id="title">Corral mark</title>
-  <desc id="desc">Three parallel rails lead to an open amber gate while one blue work item crosses the boundary.</desc>
-  <rect x="16" y="16" width="224" height="224" rx="32" fill="#191A16"/>
-  <path d="M58 60v136M94 60v136M130 60v136" fill="none" stroke="#D8890B" stroke-width="12" stroke-linecap="round"/>
-  <path d="M164 60h22a12 12 0 0 1 12 12v36M198 148v36a12 12 0 0 1-12 12h-22" fill="none" stroke="#D8890B" stroke-width="8" stroke-linecap="square"/>
-  <rect x="184" y="116" width="24" height="24" rx="4" fill="#78A4FF"/>
-  <path d="M208 128h28" fill="none" stroke="#78A4FF" stroke-width="8" stroke-linecap="square"/>
-</svg>
