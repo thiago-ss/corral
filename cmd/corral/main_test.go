@@ -118,6 +118,14 @@ func TestDoctorReportsProblems(t *testing.T) {
 
 func TestDoctorPassesWithDaemonUp(t *testing.T) {
 	dir := gitRepo(t)
+	// Provide a stub opencode so the version check passes on CI runners
+	// that do not have it installed.
+	stub := filepath.Join(t.TempDir(), "opencode")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 1.18.15\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", filepath.Dir(stub)+string(os.PathListSeparator)+origPath)
 	// Simulate a healthy daemon.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"healthy":true}`))
