@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 960" width="720" height="960" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="title">Corral's default run pipeline</title>
+  <desc id="desc">A goal becomes a graph, fans out to isolated worker branches, converges at an evidence gate, waits for operator approval, then lands in the current branch.</desc>
+  <style>
+    .paper{fill:#F3F0E8}.ink{fill:#191A16}.ink-stroke{stroke:#191A16}.muted{fill:#66665E}.rail{stroke:#B6AFA1}.amber{fill:#D8890B}.amber-stroke{stroke:#D8890B}.blue{fill:#2B63D9}.blue-stroke{stroke:#2B63D9}.green{fill:#1F7A50}.green-stroke{stroke:#1F7A50}
+    @media (prefers-color-scheme:dark){.paper{fill:#141612}.ink{fill:#ECE8DC}.ink-stroke{stroke:#ECE8DC}.muted{fill:#A3A096}.rail{stroke:#4B5048}.amber{fill:#F2AA2A}.amber-stroke{stroke:#F2AA2A}.blue{fill:#78A4FF}.blue-stroke{stroke:#78A4FF}.green{fill:#57C78B}.green-stroke{stroke:#57C78B}}
+  </style>
+  <rect width="720" height="960" rx="20" class="paper"/>
+  <text x="40" y="56" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="26">planner's default graph</text>
+  <path d="M40 82H680" class="rail" stroke-width="2"/>
+
+  <g fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <circle cx="360" cy="142" r="38" class="ink-stroke" stroke-width="4"/>
+    <rect x="347" y="129" width="26" height="26" rx="4" class="ink" stroke="none"/>
+    <path d="M360 180V226" class="rail" stroke-width="4"/>
+    <path d="M360 226C360 248 150 240 150 278M360 226V278M360 226C360 248 570 240 570 278" class="rail" stroke-width="4"/>
+
+    <rect x="64" y="278" width="172" height="76" rx="8" class="ink-stroke" stroke-width="3"/>
+    <rect x="274" y="278" width="172" height="76" rx="8" class="blue-stroke" stroke-width="4"/>
+    <rect x="484" y="278" width="172" height="76" rx="8" class="ink-stroke" stroke-width="3"/>
+    <path d="M88 316H212M298 316H422M508 316H632" class="rail" stroke-width="3"/>
+    <rect x="112" y="303" width="26" height="26" rx="4" class="ink" stroke="none"/>
+    <rect x="347" y="303" width="26" height="26" rx="4" class="blue" stroke="none"/>
+    <rect x="572" y="303" width="26" height="26" rx="4" class="ink" stroke="none"/>
+
+    <path d="M150 354C150 398 360 388 360 424M360 354V424M570 354C570 398 360 388 360 424" class="rail" stroke-width="4"/>
+    <path d="M296 448h42M382 448h42" class="amber-stroke" stroke-width="10"/>
+    <rect x="344" y="432" width="32" height="32" rx="5" class="blue" stroke="none"/>
+    <path d="M360 464V556" class="rail" stroke-width="4"/>
+    <path d="M360 556l52 52-52 52-52-52z" class="amber-stroke" stroke-width="5"/>
+    <path d="M360 660V812" class="green-stroke" stroke-width="6"/>
+    <path d="M342 794l18 18 18-18" class="green-stroke" stroke-width="6"/>
+  </g>
+
+  <g font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="25" text-anchor="middle">
+    <text x="360" y="210" class="ink">goal</text>
+    <text x="360" y="266" class="ink">isolated worktrees</text>
+    <text x="360" y="504" class="ink">evidence gate</text>
+    <text x="360" y="536" class="muted" font-size="22">command · schema · diff</text>
+    <text x="360" y="618" class="ink" font-size="26">you</text>
+    <text x="360" y="706" class="ink">approval</text>
+    <text x="360" y="866" class="ink">current branch</text>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1040" width="720" height="1040" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="title">Deterministic scheduler simulation results</title>
+  <desc id="desc">Four workers complete eight independent tasks in 21 ticks instead of 81. After a crash halfway through, Corral redoes 11 ticks instead of 81. In a scripted gate demo, seven outputs pass and three are rejected before merge.</desc>
+  <style>
+    .paper{fill:#F3F0E8}.ink{fill:#191A16}.muted{fill:#66665E}.rail-fill{fill:#B6AFA1}.rail{stroke:#B6AFA1}.blue{fill:#2B63D9}.green{fill:#1F7A50}.red{fill:#B8453F}
+    @media (prefers-color-scheme:dark){.paper{fill:#141612}.ink{fill:#ECE8DC}.muted{fill:#A3A096}.rail-fill{fill:#4B5048}.rail{stroke:#4B5048}.blue{fill:#78A4FF}.green{fill:#57C78B}.red{fill:#FF8178}}
+  </style>
+  <rect width="720" height="1040" rx="20" class="paper"/>
+  <text x="40" y="58" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="24">deterministic simulation</text>
+  <text x="40" y="90" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="24">synthetic agents</text>
+  <path d="M40 120H680M40 418H680M40 716H680" class="rail" fill="none" stroke-width="2"/>
+
+  <g font-family="'Avenir Next', Avenir, system-ui, sans-serif">
+    <text x="40" y="170" class="ink" font-size="28" font-weight="700">parallel wall time</text>
+    <text x="40" y="250" class="ink" font-size="76" font-weight="800" letter-spacing="-2">3.9×</text>
+    <text x="40" y="288" class="muted" font-size="24">faster · 8 independent tasks</text>
+    <rect x="40" y="326" width="520" height="20" rx="4" class="rail-fill"/>
+    <rect x="40" y="370" width="135" height="20" rx="4" class="blue"/>
+    <text x="582" y="345" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="22">81</text>
+    <text x="191" y="389" class="ink" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="22">21 ticks</text>
+
+    <text x="40" y="468" class="ink" font-size="28" font-weight="700">crash recovery</text>
+    <text x="40" y="548" class="ink" font-size="76" font-weight="800" letter-spacing="-2">7.4×</text>
+    <text x="40" y="586" class="muted" font-size="24">less work repeated</text>
+    <rect x="40" y="624" width="520" height="20" rx="4" class="rail-fill"/>
+    <rect x="40" y="668" width="71" height="20" rx="4" class="green"/>
+    <text x="582" y="643" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="22">81</text>
+    <text x="127" y="687" class="ink" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="22">11 ticks</text>
+
+    <text x="40" y="766" class="ink" font-size="28" font-weight="700">evidence gates</text>
+    <text x="40" y="846" class="ink" font-size="76" font-weight="800" letter-spacing="-2">7 / 10</text>
+    <text x="40" y="884" class="muted" font-size="24">outputs passed</text>
+    <g transform="translate(40 920)">
+      <rect x="0" y="0" width="42" height="42" rx="6" class="green"/><rect x="50" y="0" width="42" height="42" rx="6" class="green"/><rect x="100" y="0" width="42" height="42" rx="6" class="green"/><rect x="150" y="0" width="42" height="42" rx="6" class="green"/><rect x="200" y="0" width="42" height="42" rx="6" class="green"/>
+      <rect x="250" y="0" width="42" height="42" rx="6" class="green"/><rect x="300" y="0" width="42" height="42" rx="6" class="green"/><rect x="350" y="0" width="42" height="42" rx="6" class="red"/><rect x="400" y="0" width="42" height="42" rx="6" class="red"/><rect x="450" y="0" width="42" height="42" rx="6" class="red"/>
+    </g>
+    <text x="40" y="1002" class="muted" font-size="23">3 rejected before merge</text>
+  </g>
+</svg>

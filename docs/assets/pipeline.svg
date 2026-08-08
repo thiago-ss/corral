@@ -1,49 +1,45 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="corral pipeline">
-  <rect width="960" height="300" rx="24" fill="#FAFAF9"/>
-  <text x="32" y="42" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="800" fill="#1C1917">one goal, one pipeline</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 480" width="1080" height="480" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="title">Corral's default run pipeline</title>
+  <desc id="desc">A goal becomes a graph, fans out to isolated worker branches, converges at an evidence gate, waits for operator approval, then lands in the current branch.</desc>
+  <style>
+    .paper{fill:#F3F0E8}.ink{fill:#191A16}.ink-stroke{stroke:#191A16}.muted{fill:#66665E}.rail{stroke:#B6AFA1}.amber{fill:#D8890B}.amber-stroke{stroke:#D8890B}.blue{fill:#2B63D9}.blue-stroke{stroke:#2B63D9}.green{fill:#1F7A50}.green-stroke{stroke:#1F7A50}
+    @media (prefers-color-scheme:dark){.paper{fill:#141612}.ink{fill:#ECE8DC}.ink-stroke{stroke:#ECE8DC}.muted{fill:#A3A096}.rail{stroke:#4B5048}.amber{fill:#F2AA2A}.amber-stroke{stroke:#F2AA2A}.blue{fill:#78A4FF}.blue-stroke{stroke:#78A4FF}.green{fill:#57C78B}.green-stroke{stroke:#57C78B}}
+  </style>
+  <rect width="1080" height="480" rx="20" class="paper"/>
+  <text x="48" y="58" class="muted" font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="24">planner's default graph</text>
+  <path d="M48 82H1032" class="rail" stroke-width="2"/>
 
-  <!-- planner -->
-  <rect x="32" y="110" width="150" height="64" rx="12" fill="#1C1917"/>
-  <text x="107" y="138" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#F59E0B">planner</text>
-  <text x="107" y="158" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#E7E5E4">turns the goal into a graph</text>
-  <path d="M 182 142 H 224" stroke="#A8A29E" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <g fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <circle cx="82" cy="240" r="34" class="ink-stroke" stroke-width="4"/>
+    <rect x="70" y="228" width="24" height="24" rx="4" class="ink" stroke="none"/>
+    <path d="M116 240H184" class="rail" stroke-width="4"/>
+    <path d="M184 240C222 240 214 148 254 148M184 240H254M184 240C222 240 214 332 254 332" class="rail" stroke-width="4"/>
 
-  <!-- workers (parallel) -->
-  <rect x="224" y="76" width="140" height="56" rx="12" fill="#FFFFFF" stroke="#2563EB" stroke-width="2"/>
-  <text x="294" y="102" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1C1917">worker w1</text>
-  <text x="294" y="120" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#78716C">own worktree</text>
-  <rect x="224" y="148" width="140" height="56" rx="12" fill="#FFFFFF" stroke="#2563EB" stroke-width="2"/>
-  <text x="294" y="174" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1C1917">worker w2</text>
-  <text x="294" y="192" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#78716C">own worktree</text>
-  <path d="M 364 104 H 406" stroke="#A8A29E" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
-  <path d="M 364 176 H 406" stroke="#A8A29E" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+    <rect x="254" y="114" width="222" height="68" rx="8" class="ink-stroke" stroke-width="3"/>
+    <rect x="254" y="206" width="222" height="68" rx="8" class="blue-stroke" stroke-width="4"/>
+    <rect x="254" y="298" width="222" height="68" rx="8" class="ink-stroke" stroke-width="3"/>
+    <path d="M278 148H448M278 240H448M278 332H448" class="rail" stroke-width="3"/>
+    <rect x="292" y="136" width="24" height="24" rx="4" class="ink" stroke="none"/>
+    <rect x="356" y="228" width="24" height="24" rx="4" class="blue" stroke="none"/>
+    <rect x="324" y="320" width="24" height="24" rx="4" class="ink" stroke="none"/>
 
-  <!-- checks -->
-  <rect x="406" y="110" width="130" height="64" rx="12" fill="#FFFFFF" stroke="#E7E5E4" stroke-width="2"/>
-  <text x="471" y="138" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1C1917">checks</text>
-  <text x="471" y="158" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#78716C">evidence gates</text>
-  <path d="M 536 142 H 578" stroke="#A8A29E" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+    <path d="M476 148C536 148 524 240 582 240M476 240H582M476 332C536 332 524 240 582 240" class="rail" stroke-width="4"/>
+    <path d="M582 182v38M582 260v38" class="amber-stroke" stroke-width="10"/>
+    <rect x="566" y="224" width="32" height="32" rx="5" class="blue" stroke="none"/>
+    <path d="M598 240H696" class="rail" stroke-width="4"/>
 
-  <!-- gate -->
-  <rect x="578" y="110" width="130" height="64" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="3"/>
-  <text x="643" y="138" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1C1917">you approve</text>
-  <text x="643" y="158" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#78716C">human gate</text>
-  <path d="M 708 142 H 750" stroke="#A8A29E" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+    <path d="M740 194l46 46-46 46-46-46z" class="amber-stroke" stroke-width="5"/>
+    <path d="M786 240H866" class="rail" stroke-width="4"/>
+    <path d="M866 240H1012" class="green-stroke" stroke-width="6"/>
+    <path d="M994 222l18 18-18 18" class="green-stroke" stroke-width="6"/>
+  </g>
 
-  <!-- merge -->
-  <rect x="750" y="110" width="130" height="64" rx="12" fill="#FFFFFF" stroke="#16A34A" stroke-width="2"/>
-  <text x="815" y="138" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#1C1917">merge</text>
-  <text x="815" y="158" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#78716C">into main</text>
-
-  <!-- lane labels -->
-  <text x="294" y="62" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#2563EB">parallel, isolated</text>
-  <text x="471" y="94" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#78716C">verification</text>
-  <text x="643" y="94" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#B45309">approval</text>
-  <text x="815" y="94" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#15803D">delivery</text>
-
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#A8A29E"/>
-    </marker>
-  </defs>
+  <g font-family="'SFMono-Regular', 'Cascadia Code', monospace" font-size="22" text-anchor="middle">
+    <text x="82" y="322" class="ink">goal</text>
+    <text x="365" y="106" class="ink">isolated worktrees</text>
+    <text x="582" y="340" class="ink">evidence</text>
+    <text x="740" y="248" class="ink" font-size="24">you</text>
+    <text x="740" y="340" class="ink">approval</text>
+    <text x="934" y="322" class="ink">current branch</text>
+  </g>
 </svg>

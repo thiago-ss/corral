@@ -50,4 +50,3 @@ non-terminal states.
 Three rails are isolated work. The open bracket is the gate. The single blue
 square is an active attempt crossing the boundary. At small sizes, omit all
 supporting dots and labels; the rails and open gate must remain legible.
-
