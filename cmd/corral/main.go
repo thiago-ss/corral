@@ -63,6 +63,8 @@ func run(args []string) error {
 		return fmt.Errorf("usage: corral <daemon|tui|init|doctor|export> [flags]")
 	}
 	switch args[0] {
+	case "update":
+		return updateCmd()
 	case "daemon":
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		port := fs.Int("port", 4519, "daemon HTTP port")
@@ -90,7 +92,7 @@ func run(args []string) error {
 		}
 		return exportCmd(args[1], out)
 	default:
-		return fmt.Errorf("unknown command %q", args[0])
+		return fmt.Errorf("unknown command %q (try: daemon, tui, up, init, doctor, export, update)", args[0])
 	}
 }
 

@@ -31,6 +31,17 @@ go install github.com/thiago-ss/corral/cmd/corral@latest
 Requires: `opencode` ≥ 1.18 on your PATH, and a git repository to
 orchestrate work in.
 
+## Updating
+
+```sh
+corral update     # downloads the latest release, sanity-checks it, replaces the binary
+corral version    # show the installed version
+```
+
+`corral update` refuses to downgrade (newer local build than the latest
+release) and validates the download by running it before replacing the
+binary. Built from source? `git pull && make install`.
+
 ## Quickstart
 
 ```sh
