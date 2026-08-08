@@ -17,6 +17,9 @@ import (
 // check expects).
 func fakeReleaseServer(t *testing.T, tag, asset, binaryScript string) *httptest.Server {
 	t.Helper()
+	if asset == "" {
+		asset = "corral-" + runtime.GOOS + "-" + goArch()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"tag_name":%q}`, tag)
@@ -48,7 +51,7 @@ func TestUpdateInstallsNewerRelease(t *testing.T) {
 		t.Skip("windows replace path is manual")
 	}
 	// Current build is "dev"; the fake release is v9.9.9.
-	srv := fakeReleaseServer(t, "v9.9.9", "corral-darwin-arm64", "#!/bin/sh\necho \"corral v9.9.9\"\n")
+	srv := fakeReleaseServer(t, "v9.9.9", "", "#!/bin/sh\necho \"corral v9.9.9\"\n")
 	t.Cleanup(srv.Close)
 	target := filepath.Join(t.TempDir(), "bin", "corral")
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -90,7 +93,7 @@ func TestUpdateInstallsNewerRelease(t *testing.T) {
 func TestUpdateAlreadyUpToDate(t *testing.T) {
 	// Simulate being on the latest release by testing the comparison
 	// through a release server and a fake current version.
-	srv := fakeReleaseServer(t, "v9.9.9", "corral-darwin-arm64", "#!/bin/sh\necho corral v9.9.9\n")
+	srv := fakeReleaseServer(t, "v9.9.9", "", "#!/bin/sh\necho corral v9.9.9\n")
 	t.Cleanup(srv.Close)
 	target := fakeBinary(t, "v9.9.9")
 	t.Setenv("CORRAL_UPDATE_API", srv.URL)
@@ -119,7 +122,7 @@ func TestUpdateAlreadyUpToDate(t *testing.T) {
 }
 
 func TestUpdateRefusesDowngrade(t *testing.T) {
-	srv := fakeReleaseServer(t, "v0.0.1", "corral-darwin-arm64", "#!/bin/sh\necho corral v0.0.1\n")
+	srv := fakeReleaseServer(t, "v0.0.1", "", "#!/bin/sh\necho corral v0.0.1\n")
 	t.Cleanup(srv.Close)
 	target := fakeBinary(t, "v9.9.9")
 	t.Setenv("CORRAL_UPDATE_API", srv.URL)
@@ -134,7 +137,7 @@ func TestUpdateRefusesDowngrade(t *testing.T) {
 }
 
 func TestUpdateSanityCheckRejectsGarbage(t *testing.T) {
-	srv := fakeReleaseServer(t, "v9.9.9", "corral-darwin-arm64", "this is not a binary")
+	srv := fakeReleaseServer(t, "v9.9.9", "", "this is not a binary")
 	t.Cleanup(srv.Close)
 	target := fakeBinary(t, "v9.9.9")
 	t.Setenv("CORRAL_UPDATE_API", srv.URL)
