@@ -64,7 +64,12 @@ func updateCmd() error {
 	if err := downloadBinary(url, tmp); err != nil {
 		return err
 	}
-	if err := tmp.Chmod(0o755); err != nil {
+	// Close before exec/rename: Linux refuses to exec a file that is
+	// still open for writing (ETXTBSY).
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		return err
 	}
 
