@@ -73,11 +73,22 @@ func (c *Client) CreateSession(ctx context.Context, title string) (Session, erro
 }
 
 func (c *Client) PromptAsync(ctx context.Context, sid, text, model string) error {
+	return c.PromptAsyncWithTools(ctx, sid, text, model, nil)
+}
+
+// PromptAsyncWithTools sends an async prompt with an optional tool
+// allowlist (tool name -> enabled). Disabled tools are removed from the
+// session so the agent cannot call them (e.g. planner sessions get no
+// bash/edit).
+func (c *Client) PromptAsyncWithTools(ctx context.Context, sid, text, model string, tools map[string]bool) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	if model != "" {
 		body["model"] = model
+	}
+	if tools != nil {
+		body["tools"] = tools
 	}
 	_, err := c.do(ctx, http.MethodPost, "/session/"+sid+"/prompt_async", url.Values{"directory": {c.dir}}, body, nil)
 	return err

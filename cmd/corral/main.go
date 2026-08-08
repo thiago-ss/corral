@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -125,7 +126,7 @@ func daemonCmd(port int, apiKey string) error {
 	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{
 		Concurrency: 4, Worktrees: wtm,
 	})
-	d := daemon.New(st, s, daemon.NewOpenCodePlanner(oc, "", 4*time.Minute), dir, apiKey)
+	d := daemon.New(st, s, daemon.NewOpenCodePlanner(oc, "", planTimeout()), dir, apiKey)
 	if err := d.Resume(ctx); err != nil {
 		log.Printf("resume: %v", err)
 	}
@@ -161,6 +162,17 @@ func daemonURL() string {
 		return base
 	}
 	return "http://127.0.0.1:4519"
+}
+
+// planTimeout is the planner session budget; override with
+// CORRAL_PLAN_TIMEOUT (seconds).
+func planTimeout() time.Duration {
+	if v := os.Getenv("CORRAL_PLAN_TIMEOUT"); v != "" {
+		if s, err := strconv.Atoi(v); err == nil && s > 0 {
+			return time.Duration(s) * time.Second
+		}
+	}
+	return 5 * time.Minute
 }
 
 // upCmd is the one-command start: initialize if needed, launch the daemon

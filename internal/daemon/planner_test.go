@@ -1,8 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
+
+	"corral/internal/ocx"
 )
 
 const validGraph = `{
@@ -72,5 +77,50 @@ func TestFindJSONEnd(t *testing.T) {
 	}
 	if end := findJSONEnd(`{unbalanced`, 0); end != -1 {
 		t.Fatalf("unbalanced should be -1, got %d", end)
+	}
+}
+
+func testMsgs(role string, text string, finish *string) []ocx.Message {
+	part := json.RawMessage(fmt.Sprintf(`{"type":"text","text":%s}`, strconv.Quote(text)))
+	info := ocx.MessageInfo{Role: role, Finish: finish}
+	return []ocx.Message{{Info: info, Parts: []json.RawMessage{part}}}
+}
+
+// TestExtractGraphFromMessages covers the progressive-parse contract:
+// a graph mid-stream is returned before terminal state; terminal state
+// is reported when no graph exists; session errors surface by name.
+func TestExtractGraphFromMessages(t *testing.T) {
+	// Complete graph in a still-streaming message -> returned immediately.
+	streaming := func() *string { return nil }()
+	g, term, errName := extractGraphFromMessages(testMsgs("assistant", "here:\n"+validGraph, streaming))
+	if g == nil || term || errName != "" {
+		t.Fatalf("streaming graph not extracted: g=%v term=%v err=%q", g != nil, term, errName)
+	}
+
+	// Terminal without graph -> terminal flagged, no error name.
+	done := "stop"
+	g, term, errName = extractGraphFromMessages(testMsgs("assistant", "I could not plan this.", &done))
+	if g != nil || !term || errName != "" {
+		t.Fatalf("terminal no-graph wrong: g=%v term=%v err=%q", g != nil, term, errName)
+	}
+
+	// Still streaming without a graph -> neither.
+	g, term, _ = extractGraphFromMessages(testMsgs("assistant", "thinking...", streaming))
+	if g != nil || term {
+		t.Fatalf("streaming no-graph wrong: term=%v", term)
+	}
+
+	// Session error surfaces the error name.
+	errMsg := json.RawMessage(`{"name":"MessageAbortedError","data":{}}`)
+	m := ocx.Message{Info: ocx.MessageInfo{Role: "assistant", Error: &errMsg}}
+	g, term, errName = extractGraphFromMessages([]ocx.Message{m})
+	if g != nil || !term || errName != "MessageAbortedError" {
+		t.Fatalf("error message wrong: g=%v term=%v err=%q", g != nil, term, errName)
+	}
+
+	// No assistant message yet -> nothing.
+	g, term, _ = extractGraphFromMessages(testMsgs("user", "goal", streaming))
+	if g != nil || term {
+		t.Fatalf("no-assistant wrong: term=%v", term)
 	}
 }

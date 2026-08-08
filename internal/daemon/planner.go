@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,8 +13,10 @@ import (
 )
 
 // OpenCodePlanner turns a goal statement into a validated corral graph by
-// asking a read-only planner agent session (no file/bash tools) to emit
-// the graph as JSON.
+// asking a read-only planner agent session to emit the graph as JSON.
+// The session runs without execution tools (no bash/edit), the response
+// is parsed progressively while it streams, and failed sessions are
+// aborted so nothing keeps burning tokens.
 type OpenCodePlanner struct {
 	oc      *ocx.Client
 	Model   string
@@ -25,19 +28,41 @@ func NewOpenCodePlanner(oc *ocx.Client, model string, timeout time.Duration) *Op
 	return &OpenCodePlanner{oc: oc, Model: model, Timeout: timeout}
 }
 
+// planTools keeps the planner read-only: reading the repo is fine,
+// anything that executes or writes is disabled. This prevents tool loops
+// that stall planning.
+var planTools = map[string]bool{
+	"bash":        false,
+	"edit":        false,
+	"write":       false,
+	"apply_patch": false,
+	"webfetch":    false,
+	"websearch":   false,
+	"task":        false,
+	"todowrite":   false,
+	"question":    false,
+	"skill":       false,
+	"lsp":         false,
+}
+
+var errNoGraph = errors.New("planner produced no valid graph")
+
+// Plan runs up to two attempts: the first with the normal prompt, a
+// stricter retry only when the model answered but its JSON was
+// unparseable. Timeouts and session errors fail fast (no retry), so a
+// slow model cannot double the wait.
 func (p *OpenCodePlanner) Plan(ctx context.Context, goal string) (*graph.Graph, error) {
 	if p.Timeout <= 0 {
-		p.Timeout = 4 * time.Minute
+		p.Timeout = 5 * time.Minute
 	}
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		g, err := p.planOnce(ctx, goal, attempt > 0)
-		if err == nil {
-			return g, nil
-		}
-		lastErr = err
+	g, err := p.planOnce(ctx, goal, false)
+	if err == nil {
+		return g, nil
 	}
-	return nil, lastErr
+	if !errors.Is(err, errNoGraph) {
+		return nil, err
+	}
+	return p.planOnce(ctx, goal, true)
 }
 
 func (p *OpenCodePlanner) planOnce(ctx context.Context, goal string, strict bool) (*graph.Graph, error) {
@@ -50,36 +75,51 @@ func (p *OpenCodePlanner) planOnce(ctx context.Context, goal string, strict bool
 		prompt = "Your previous response contained no valid graph JSON. " +
 			"Return ONLY the JSON object described above, nothing else. " + prompt
 	}
-	if err := p.oc.PromptAsync(ctx, sess.ID, prompt, p.Model); err != nil {
+	if err := p.oc.PromptAsyncWithTools(ctx, sess.ID, prompt, p.Model, planTools); err != nil {
 		return nil, fmt.Errorf("planner prompt: %w", err)
 	}
 	deadline := time.Now().Add(p.Timeout)
-	for time.Now().Before(deadline) {
+	for {
 		select {
 		case <-ctx.Done():
+			_ = p.oc.Abort(ctx, sess.ID)
 			return nil, ctx.Err()
 		default:
 		}
-		msgs, err := p.oc.Messages(ctx, sess.ID, 5)
-		if err == nil {
-			for _, m := range msgs {
-				if m.Info.Role == "assistant" && (m.Info.Finish != nil || m.Info.Error != nil) {
-					goto planningDone
+		if msgs, err := p.oc.Messages(ctx, sess.ID, 8); err == nil {
+			// Parse progressively: as soon as a complete, valid graph
+			// object is in the stream, return it — no need to wait for
+			// the session to finish.
+			if g, terminal, errName := extractGraphFromMessages(msgs); g != nil {
+				return g, nil
+			} else if terminal {
+				if errName != "" {
+					return nil, fmt.Errorf("planner session error: %s", errName)
 				}
+				return nil, fmt.Errorf("%w (model answered without graph JSON)", errNoGraph)
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(400 * time.Millisecond)
 	}
-planningDone:
-	msgs, err := p.oc.Messages(ctx, sess.ID, 5)
-	if err != nil {
-		return nil, fmt.Errorf("planner messages: %w", err)
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Info.Role != "assistant" {
+	// Timed out: kill the session so it stops generating, and fail fast.
+	_ = p.oc.Abort(ctx, sess.ID)
+	return nil, fmt.Errorf("planner timed out after %s (no terminal response)", p.Timeout)
+}
+
+// extractGraphFromMessages scans assistant text parts (newest message
+// first) for a complete graph, and reports whether the newest assistant
+// message is terminal (finished or errored).
+func extractGraphFromMessages(msgs []ocx.Message) (g *graph.Graph, terminal bool, errName string) {
+	var newest *ocx.Message
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Info.Role != "assistant" {
 			continue
 		}
-		for _, part := range msgs[i].Parts {
+		for _, part := range m.Parts {
 			var p2 struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -87,14 +127,35 @@ planningDone:
 			if json.Unmarshal(part, &p2) != nil || p2.Type != "text" {
 				continue
 			}
-			g, err := parseGraphFromResponse(p2.Text)
-			if err != nil {
-				continue
+			if g, err := parseGraphFromResponse(p2.Text); err == nil {
+				return g, false, ""
 			}
-			return g, nil
 		}
+		newest = m
 	}
-	return nil, fmt.Errorf("planner produced no valid graph")
+	if newest == nil {
+		return nil, false, ""
+	}
+	if newest.Info.Error != nil {
+		return nil, true, errorName(newest.Info.Error)
+	}
+	if newest.Info.Finish != nil {
+		return nil, true, ""
+	}
+	return nil, false, ""
+}
+
+func errorName(raw *json.RawMessage) string {
+	if raw == nil {
+		return ""
+	}
+	var e struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(*raw, &e); err != nil {
+		return ""
+	}
+	return e.Name
 }
 
 // parseGraphFromResponse extracts the first object that looks like a
