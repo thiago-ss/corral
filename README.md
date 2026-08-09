@@ -105,16 +105,18 @@ itself may add the OpenCode tool and agent config to your checkout.
 
 ## What counts as evidence
 
-Corral currently wires three completion paths:
+Corral currently wires four completion paths:
 
 - **Command:** run an argv-style command in the attempt worktree and require
   exit code `0`.
 - **JSON Schema:** validate a declared JSON artifact against a schema.
 - **Default diff:** when no gate is declared, require at least one file diff
   reported by the driver. Prose alone fails.
-
-The graph schema also contains a reviewer-gate seam, but the production daemon
-does not wire a reviewer implementation yet.
+- **Reviewer:** a read-only OpenCode session reviews the attempt's evidence —
+  objective, prior feedback, transcript, the recorded diff artifact, and check
+  results — and must conclude `APPROVED`; a `NOT_APPROVED` verdict returns its
+  note as focused retry feedback. Set `CORRAL_REVIEWER_MODEL` to use a specific
+  model for review sessions.
 
 ## Proof, not promises
 
@@ -194,9 +196,10 @@ The core packages are deliberately small:
 | `internal/graph` | graph schema, validation, states, ready computation |
 | `internal/sched` | leases, priority, retries, gates, merge orchestration |
 | `internal/store` | SQLite event log, materialized nodes, attempts, artifacts |
-| `internal/verify` | command, JSON Schema, and diff evidence |
+| `internal/verify` | command, JSON Schema, diff, and reviewer evidence |
 | `internal/worktree` | branch/worktree lifecycle and diff artifacts |
 | `internal/ocxadapter` | OpenCode sessions and completion reconciliation |
+| `internal/ocxreviewer` | OpenCode reviewer sessions for the reviewer gate |
 | `internal/daemon` | control API, planning, role routing, audit export |
 | `internal/tui` | terminal dashboard and operator controls |
 
