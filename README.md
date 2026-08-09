@@ -179,6 +179,29 @@ CORRAL_DAEMON_KEY="$(cat .corral/api.key)" \
   corral export <runID> > audit.json
 ```
 
+### Run-level safeguards
+
+The daemon ships with run-level safeguards enabled by default. Each is
+overridable via an environment variable; a value of `0` disables it. These are
+ceilings for runaway runs — normal runs should never hit them.
+
+| Variable | Default | Behavior |
+|---|---|---|
+| `CORRAL_BREAKER_MAX_FAILURES` | `5` | Circuit breaker: once `N` node failures occur within the window, the run stops starting new work; pending nodes are blocked (`reason: circuit breaker`) and an operator retry resets the breaker. |
+| `CORRAL_BREAKER_WINDOW` | `900` (seconds, 15 min) | Failures are counted within this rolling window. |
+| `CORRAL_RUN_MAX_TOKENS` | `1_000_000` | Run-level token budget, accumulated across all finished attempts; once exceeded, pending nodes are blocked (`reason: run budget exceeded`). |
+| `CORRAL_RUN_MAX_COST` | `100` (USD) | Run-level cost budget, accumulated across all finished attempts; once exceeded, pending nodes are blocked. |
+
+Example:
+
+```sh
+CORRAL_BREAKER_MAX_FAILURES=3 \
+CORRAL_BREAKER_WINDOW=600 \
+CORRAL_RUN_MAX_TOKENS=250000 \
+CORRAL_RUN_MAX_COST=50 \
+corral up
+```
+
 ## Development
 
 ```sh

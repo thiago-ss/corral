@@ -259,6 +259,70 @@ func TestUpCmdSpawnsHealthyDaemon(t *testing.T) {
 	_ = exec.Command("pkill", "-f", "corral daemon --port "+fmt.Sprint(port)).Run()
 }
 
+func TestSchedOptsDefaultsAndOverrides(t *testing.T) {
+	for _, name := range []string{
+		"CORRAL_BREAKER_MAX_FAILURES", "CORRAL_BREAKER_WINDOW",
+		"CORRAL_RUN_MAX_TOKENS", "CORRAL_RUN_MAX_COST",
+	} {
+		t.Setenv(name, "")
+	}
+	o := schedOpts(nil)
+	if o.Concurrency != 4 {
+		t.Fatalf("Concurrency = %d, want 4 (fixed wiring)", o.Concurrency)
+	}
+	if o.Worktrees != nil {
+		t.Fatalf("Worktrees = %v, want nil (as passed in)", o.Worktrees)
+	}
+	if o.BreakerMaxFailures != 5 {
+		t.Fatalf("BreakerMaxFailures = %d, want default 5", o.BreakerMaxFailures)
+	}
+	if o.BreakerWindow != 15*time.Minute {
+		t.Fatalf("BreakerWindow = %s, want default 15m", o.BreakerWindow)
+	}
+	if o.RunMaxTokens != 1_000_000 {
+		t.Fatalf("RunMaxTokens = %d, want default 1000000", o.RunMaxTokens)
+	}
+	if o.RunMaxCost != 100 {
+		t.Fatalf("RunMaxCost = %v, want default 100", o.RunMaxCost)
+	}
+
+	// Overrides apply.
+	t.Setenv("CORRAL_BREAKER_MAX_FAILURES", "3")
+	t.Setenv("CORRAL_BREAKER_WINDOW", "60")
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "5000")
+	t.Setenv("CORRAL_RUN_MAX_COST", "0.25")
+	o = schedOpts(nil)
+	if o.BreakerMaxFailures != 3 {
+		t.Fatalf("BreakerMaxFailures = %d, want 3", o.BreakerMaxFailures)
+	}
+	if o.BreakerWindow != time.Minute {
+		t.Fatalf("BreakerWindow = %s, want 1m", o.BreakerWindow)
+	}
+	if o.RunMaxTokens != 5000 {
+		t.Fatalf("RunMaxTokens = %d, want 5000", o.RunMaxTokens)
+	}
+	if o.RunMaxCost != 0.25 {
+		t.Fatalf("RunMaxCost = %v, want 0.25", o.RunMaxCost)
+	}
+
+	// 0 disables a safeguard rather than falling back to the default.
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "0")
+	t.Setenv("CORRAL_BREAKER_MAX_FAILURES", "0")
+	o = schedOpts(nil)
+	if o.RunMaxTokens != 0 || o.BreakerMaxFailures != 0 {
+		t.Fatalf("zero should disable safeguards: %+v", o)
+	}
+
+	// Unparsable values fall back to the defaults.
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "banana")
+	t.Setenv("CORRAL_RUN_MAX_COST", "not-a-number")
+	t.Setenv("CORRAL_BREAKER_WINDOW", "soon")
+	o = schedOpts(nil)
+	if o.RunMaxTokens != 1_000_000 || o.RunMaxCost != 100 || o.BreakerWindow != 15*time.Minute {
+		t.Fatalf("unparsable env should fall back to defaults: %+v", o)
+	}
+}
+
 func TestVersionAtLeast(t *testing.T) {
 	cases := []struct {
 		v, min string
