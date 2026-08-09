@@ -170,9 +170,10 @@ func daemonCmd(port int, apiKey string) error {
 	wtm := worktree.NewManager(dir)
 	eng := verify.New(dir)
 	eng.Runner = verify.ExecRunner{}
-	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{
-		Concurrency: 4, Worktrees: wtm,
-	})
+	opts := schedOpts(wtm)
+	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, opts)
+	log.Printf("run safeguards: breaker %d failures per %s; run budget %d tokens / $%.2f",
+		opts.BreakerMaxFailures, opts.BreakerWindow, opts.RunMaxTokens, opts.RunMaxCost)
 	d := daemon.New(st, s, daemon.NewOpenCodePlanner(oc, "", planTimeout()), dir, apiKey)
 	if err := d.Resume(ctx); err != nil {
 		log.Printf("resume: %v", err)
@@ -239,6 +240,42 @@ func planTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// schedOpts returns the daemon scheduler options: the fixed
+// concurrency/worktree wiring plus run-level safeguards with defaults
+// that env vars override (a value of 0 disables a safeguard).
+func schedOpts(wtm *worktree.Manager) sched.Options {
+	return sched.Options{
+		Concurrency:        4,
+		Worktrees:          wtm,
+		BreakerMaxFailures: intEnv("CORRAL_BREAKER_MAX_FAILURES", 5),
+		BreakerWindow:      time.Duration(intEnv("CORRAL_BREAKER_WINDOW", 900)) * time.Second,
+		RunMaxTokens:       intEnv("CORRAL_RUN_MAX_TOKENS", 1_000_000),
+		RunMaxCost:         floatEnv("CORRAL_RUN_MAX_COST", 100),
+	}
+}
+
+// intEnv returns the named env var as an int, or def when unset or
+// unparsable.
+func intEnv(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// floatEnv returns the named env var as a float64, or def when unset or
+// unparsable.
+func floatEnv(name string, def float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // statusCmd lists runs through the daemon (the TUI shows the same data).
