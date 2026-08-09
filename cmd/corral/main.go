@@ -35,6 +35,7 @@ import (
 	"corral/internal/daemon"
 	"corral/internal/ocx"
 	"corral/internal/ocxadapter"
+	"corral/internal/ocxreviewer"
 	"corral/internal/sched"
 	"corral/internal/spike"
 	"corral/internal/store"
@@ -170,6 +171,7 @@ func daemonCmd(port int, apiKey string) error {
 	wtm := worktree.NewManager(dir)
 	eng := verify.New(dir)
 	eng.Runner = verify.ExecRunner{}
+	eng.Reviewer = ocxreviewer.New(oc, ocxreviewer.Options{Model: reviewerModel()})
 	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{
 		Concurrency: 4, Worktrees: wtm,
 	})
@@ -239,6 +241,12 @@ func planTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// reviewerModel overrides the reviewer session model; override with
+// CORRAL_REVIEWER_MODEL ("" = the OpenCode server default).
+func reviewerModel() string {
+	return os.Getenv("CORRAL_REVIEWER_MODEL")
 }
 
 // statusCmd lists runs through the daemon (the TUI shows the same data).

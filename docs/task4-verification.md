@@ -14,9 +14,11 @@ focused feedback; budgets bound retries; prose alone never completes work.
     (relative to the worktree) against the schema (santhosh-tekuri
     jsonschema); missing/invalid files and schema violations produce
     concrete feedback (first 5 validation errors).
-  - **reviewer**: injectable `Reviewer` session receives the attempt
-    transcript + worktree and must conclude APPROVED; rejection note is
-    the feedback.
+  - **reviewer**: `internal/ocxreviewer` implements the injectable
+    `Reviewer` seam on top of OpenCode: a read-only LLM session receives the
+    attempt's evidence (objective, prior feedback, transcript, recorded diff
+    artifact and check results), must conclude APPROVED; the rejection note
+    is the feedback. `CORRAL_REVIEWER_MODEL` overrides the session model.
   - **default gate** (no method declared): an attempt must have produced
     at least one diff — agent prose alone cannot mark work complete.
   - **check nodes**: verdict derived from their own command run carried in
@@ -39,6 +41,7 @@ focused feedback; budgets bound retries; prose alone never completes work.
 | Criterion | Evidence |
 |---|---|
 | Command, JSON-schema, reviewer checks | `verify` unit tests: pass/fail + feedback for each kind; check-node verdict from Meta |
+| Reviewer approves / rejects with a note | `ocxreviewer` tests: scripted fake LLM server covers APPROVED, NOT_APPROVED with notes, session errors, missing verdicts, timeout; `TestOpenCodeReviewerLive` runs a real review session (gated on `CORRAL_LIVE`) |
 | Failed verification returns focused feedback | `TestFailThenPassAfterRetryWithFeedback`: gate 1 stderr reaches attempt 2 verbatim |
 | Retry count, timeout, budget bounded | retries from policy; time budget aborts (Task 2); `TestTokenBudgetBoundsRetries` stops retries after MaxTokens consumed |
 | Exhausted node becomes blocked or failed | `TestPermanentFailureBlocksDownstream`: failed, dependent blocked, run settles `waiting`, dependent never ran |
@@ -52,3 +55,8 @@ focused feedback; budgets bound retries; prose alone never completes work.
   intervention (used by later tasks).
 - `TestOpenCodeEvidenceGates` is deterministic because the gates grep for
   fixed markers the prompt demands, independent of model behavior.
+- Reviewer sessions are read-only (write tools removed, bash kept for
+  tests/diffs), poll the transcript to idle, and parse the verdict from the
+  last assistant message. The verdict format is fixed in the prompt:
+  `APPROVED`/`NOT_APPROVED` plus a `Note:` line; anything else fails the
+  gate with a parse error.
