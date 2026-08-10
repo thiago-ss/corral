@@ -1,9 +1,11 @@
 package daemon_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -298,6 +300,175 @@ type fakePlanner struct{ g *graph.Graph }
 func (f *fakePlanner) Plan(_ context.Context, _ string) (*graph.Graph, error) { return f.g, nil }
 
 var _ = daemon.RoleOperator
+
+// TestAutoApproveGatesThroughAPI creates a run with autoApproveGates and
+// verifies the flag is stored, exposed by GET /api/runs/{id}, and that the
+// gate completes without any operator approval.
+func TestAutoApproveGatesThroughAPI(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		workerNode("w1", "a.txt", "A1"),
+		gateNode("gate", "w1"),
+	}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g, "autoApproveGates": true})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+
+	// The flag is exposed on the run detail.
+	code, body = a.do("operator", http.MethodGet, "/api/runs/"+created.RunID, nil)
+	if code != http.StatusOK || !strings.Contains(body, `"autoApproveGates":true`) {
+		t.Fatalf("autoApproveGates not exposed: %d %s", code, body)
+	}
+	// No operator approval needed: the gate completes on its own and the
+	// run settles without any approve call.
+	a.waitState(t, "", created.RunID, "gate", graph.StateDone, 30*time.Second)
+	code, body = a.do("operator", http.MethodGet, "/api/runs/"+created.RunID, nil)
+	if code != http.StatusOK || !strings.Contains(body, `"done":true`) {
+		t.Fatalf("run not done: %d %s", code, body)
+	}
+}
+
+// TestWatchStreamsEvents drives the run through the SSE watch stream: it
+// must report the gate awaiting approval, and a done frame once the run
+// completes after the operator approves.
+func TestWatchStreamsEvents(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		workerNode("w1", "a.txt", "A1"),
+		gateNode("gate", "w1"),
+	}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+
+	resp, err := http.Get(a.base + "/api/runs/" + created.RunID + "/watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+	r := bufio.NewReader(resp.Body)
+
+	// The worker runs and the gate parks awaiting approval — the stream
+	// must flag it.
+	f, err := sseUntil(r, 30*time.Second, func(m map[string]any) bool {
+		g, _ := m["gate"].(bool)
+		aa, _ := m["awaitingApproval"].(bool)
+		return g && aa
+	})
+	if err != nil {
+		t.Fatalf("gate frame: %v", err)
+	}
+	if f["nodeID"] != "gate" || f["to"] != "running" {
+		t.Fatalf("gate frame = %v, want nodeID gate to running", f)
+	}
+
+	// Approve via the API; the run completes and the stream emits done.
+	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/approve", map[string]any{"nodeID": "gate"})
+	if code != http.StatusOK {
+		t.Fatalf("approve: %d %s", code, body)
+	}
+	f, err = sseUntil(r, 30*time.Second, func(m map[string]any) bool { return m["type"] == "done" })
+	if err != nil {
+		t.Fatalf("done frame: %v", err)
+	}
+	if f["status"] != "completed" {
+		t.Fatalf("done status = %v, want completed", f["status"])
+	}
+}
+
+// TestWatchReportsDoneForSettledRun opens the watch stream after a run
+// already settled: with no pending events the endpoint emits an immediate
+// done frame (and the `after` cursor is honored).
+func TestWatchReportsDoneForSettledRun(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 50 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{workerNode("w1", "a.txt", "A1")}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+	a.waitState(t, "", created.RunID, "w1", graph.StateDone, 30*time.Second)
+
+	resp, err := http.Get(a.base + "/api/runs/" + created.RunID + "/watch?after=999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+	f, err := sseUntil(r, 10*time.Second, func(m map[string]any) bool { return m["type"] == "done" })
+	if err != nil {
+		t.Fatalf("done frame: %v", err)
+	}
+	if f["status"] != "completed" {
+		t.Fatalf("done status = %v, want completed", f["status"])
+	}
+}
+
+// sseFrame reads one SSE data frame (data lines up to the blank line)
+// and parses it as JSON.
+func sseFrame(r *bufio.Reader, timeout time.Duration) (map[string]any, error) {
+	type res struct {
+		m   map[string]any
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		var data []string
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				ch <- res{err: err}
+				return
+			}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" && len(data) > 0 {
+				var m map[string]any
+				if err := json.Unmarshal([]byte(strings.Join(data, "")), &m); err != nil {
+					ch <- res{err: fmt.Errorf("sse decode: %w", err)}
+					return
+				}
+				ch <- res{m: m}
+				return
+			}
+			if strings.HasPrefix(trimmed, "data:") {
+				data = append(data, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+			}
+		}
+	}()
+	select {
+	case r := <-ch:
+		return r.m, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timed out waiting for SSE frame")
+	}
+}
+
+// sseUntil consumes SSE frames until one satisfies pred.
+func sseUntil(r *bufio.Reader, timeout time.Duration, pred func(map[string]any) bool) (map[string]any, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		frame, err := sseFrame(r, time.Until(deadline))
+		if err != nil {
+			return nil, err
+		}
+		if pred(frame) {
+			return frame, nil
+		}
+	}
+}
 
 func TestPermissionThroughAPI(t *testing.T) {
 	a, d, _, drv := setupDaemon(t, "")

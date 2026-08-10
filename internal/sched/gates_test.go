@@ -134,6 +134,41 @@ func TestTokenBudgetBoundsRetries(t *testing.T) {
 	}
 }
 
+func TestAutoApproveGatesSkipsOperator(t *testing.T) {
+	st := newStore(t)
+	clk := fakeClock()
+	drv := sched.NewFakeDriver(clk, scriptsFor("w"))
+	ver := sched.NewFakeVerifier(nil, sched.Verdict{Pass: true})
+	s := newSched(t, st, drv, ver, clk, sched.Options{Concurrency: 1})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		agent("w"),
+		{ID: "gate", Type: graph.NodeHuman, Objective: "approve", Priority: graph.PriorityNormal, DependsOn: []graph.NodeID{"w"}},
+	}}
+	h, err := s.CreateWithOptions(context.Background(), "run-autoapprove", g, sched.RunOptions{AutoApproveGates: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(t, h, clk, 100)
+	if !h.Done() {
+		t.Fatal("auto-approve run did not settle")
+	}
+	// The gate must have passed without an operator action.
+	if st2, _ := h.State("gate"); st2 != graph.StateDone {
+		t.Fatalf("gate state = %s, want done (auto-approved)", st2)
+	}
+	atts, _ := st.Attempts(context.Background(), "run-autoapprove", "gate")
+	if len(atts) != 1 || atts[0].Status != "done" {
+		t.Fatalf("gate attempts = %+v, want a single done attempt", atts)
+	}
+	r, err := st.Run(context.Background(), "run-autoapprove")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "completed" {
+		t.Fatalf("run status = %s, want completed", r.Status)
+	}
+}
+
 func TestCheckNodeRunsCommandAndRetries(t *testing.T) {
 	st := newStore(t)
 	clk := fakeClock()
