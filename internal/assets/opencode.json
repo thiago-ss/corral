@@ -11,6 +11,7 @@
         "corral_plan": "allow",
         "corral_start": "allow",
         "corral_status": "allow",
+        "corral_watch": "allow",
         "corral_approve": "allow",
         "corral_reject": "allow",
         "corral_cancel": "allow",

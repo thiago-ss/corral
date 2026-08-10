@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -132,6 +133,84 @@ func TestAttemptsUniquePerNode(t *testing.T) {
 	}
 	if len(atts) != 2 || atts[0].ID != "a/1" || atts[1].ID != "a/2" {
 		t.Fatalf("attempts wrong: %+v", atts)
+	}
+}
+
+// TestMigrateAddsAutoApproveColumn opens a database created with the
+// pre-auto-approve schema and verifies the column is added, so existing
+// deployments keep working after an upgrade.
+func TestMigrateAddsAutoApproveColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	oldDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldDB.Exec(`CREATE TABLE runs (
+		id TEXT PRIMARY KEY,
+		graph TEXT NOT NULL,
+		status TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);`); err != nil {
+		t.Fatal(err)
+	}
+	oldDB.Close()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+		t.Fatal(err)
+	}
+	ru, err := st.Run(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ru.AutoApproveGates {
+		t.Fatal("migrated run should default autoApproveGates to false")
+	}
+}
+
+func TestAutoApproveGatesPersisted(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	// Default run: flag off.
+	if err := st.CreateRun(ctx, "off", testGraph(t), now()); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit run: flag on.
+	if err := st.CreateRunWithOpts(ctx, "on", testGraph(t), true, now()); err != nil {
+		t.Fatal(err)
+	}
+	off, err := st.Run(ctx, "off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.AutoApproveGates {
+		t.Fatal("default run has autoApproveGates set")
+	}
+	on, err := st.Run(ctx, "on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.AutoApproveGates {
+		t.Fatal("autoApproveGates not persisted on the run")
+	}
+	// ListRuns carries the flag too.
+	runs, err := st.ListRuns(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	for _, r := range runs {
+		want := r.ID == "on"
+		if r.AutoApproveGates != want {
+			t.Fatalf("run %s autoApproveGates = %v, want %v", r.ID, r.AutoApproveGates, want)
+		}
 	}
 }
 
