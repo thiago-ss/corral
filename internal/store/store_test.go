@@ -32,7 +32,7 @@ func now() time.Time { return time.UnixMilli(1786000000000) }
 func TestCreateRunAndReplay(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
-	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.AppendTransition(ctx, "r1", "a", graph.StatePending, graph.StateReady, "", now()); err != nil {
@@ -69,7 +69,7 @@ func TestCreateRunAndReplay(t *testing.T) {
 func TestLeaseAtomicity(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
-	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	ok, err := st.AcquireLease(ctx, "r1", "a", "h1", time.Minute, now())
@@ -112,7 +112,7 @@ func TestLeaseAtomicity(t *testing.T) {
 func TestAttemptsUniquePerNode(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
-	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	a := Attempt{ID: "a/1", RunID: "r1", NodeID: "a", No: 1, Status: "running"}
@@ -138,7 +138,7 @@ func TestAttemptsUniquePerNode(t *testing.T) {
 func TestMarkInterrupted(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
-	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"a/1", "b/1"} {

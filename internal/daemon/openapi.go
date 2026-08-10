@@ -25,6 +25,9 @@ const OpenAPI = `{
     "/api/runs/{id}": {
       "get": {"responses": {"200": {"description": "run detail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunDetail"}}}}}}
     },
+    "/api/runs/{id}/watch": {
+      "get": {"parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "timeout", "in": "query", "schema": {"type": "integer"}}], "responses": {"200": {"description": "run snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WatchResponse"}}}}}}
+    },
     "/api/runs/{id}/approve": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/reject": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/cancel": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
@@ -113,8 +116,20 @@ const OpenAPI = `{
         "properties": {
           "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
           "graph": {"$ref": "#/components/schemas/Graph"},
+          "autoApproveGates": {"type": "boolean"},
           "states": {"type": "object", "additionalProperties": {"type": "string"}},
           "attempts": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/components/schemas/Attempt"}}},
+          "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
+        }
+      },
+      "WatchResponse": {
+        "type": "object", "required": ["runID"],
+        "properties": {
+          "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
+          "autoApproveGates": {"type": "boolean"},
+          "states": {"type": "object", "additionalProperties": {"type": "string"}},
+          "gatesAwaitingApproval": {"type": "array", "items": {"type": "string"}},
+          "since": {"type": "integer"},
           "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
         }
       },

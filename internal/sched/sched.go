@@ -133,13 +133,27 @@ type RunHandle struct {
 	started   time.Time
 }
 
+// CreateOptions carries per-run creation policies (extended without
+// breaking existing callers, which keep compiling with no options).
+type CreateOptions struct {
+	// AutoApproveGates marks the run as pre-authorized: the orchestrator
+	// agent approves human gates itself as they are reached, without
+	// waiting for the operator. When false the orchestrator must never
+	// approve gates on its own.
+	AutoApproveGates bool
+}
+
 // Create starts a new run for g.
-func (s *Scheduler) Create(ctx context.Context, runID string, g *graph.Graph) (*RunHandle, error) {
+func (s *Scheduler) Create(ctx context.Context, runID string, g *graph.Graph, opts ...CreateOptions) (*RunHandle, error) {
 	if err := graph.Validate(g); err != nil {
 		return nil, err
 	}
+	var o CreateOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	now := s.clk.Now()
-	if err := s.store.CreateRun(ctx, runID, g, now); err != nil {
+	if err := s.store.CreateRun(ctx, runID, g, o.AutoApproveGates, now); err != nil {
 		return nil, err
 	}
 	return s.newHandle(ctx, runID, g, now)

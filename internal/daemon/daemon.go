@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +107,7 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs", d.role(RoleOrchestrator, RoleOperator)(d.handleCreateRun))
 	mux.HandleFunc("GET /api/runs", d.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", d.handleGetRun)
+	mux.HandleFunc("GET /api/runs/{id}/watch", d.handleWatchRun)
 	mux.HandleFunc("POST /api/runs/{id}/approve", d.role(RoleOperator, RoleOrchestrator)(d.handleApprove))
 	mux.HandleFunc("POST /api/runs/{id}/reject", d.role(RoleOperator, RoleOrchestrator)(d.handleReject))
 	mux.HandleFunc("POST /api/runs/{id}/cancel", d.role(RoleOperator, RoleOrchestrator)(d.handleCancel))
@@ -184,7 +186,8 @@ func (d *Daemon) handlePlan(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Graph *graph.Graph `json:"graph"`
+		Graph            *graph.Graph `json:"graph"`
+		AutoApproveGates bool         `json:"autoApproveGates"`
 	}
 	if err := readJSON(r, &req); err != nil || req.Graph == nil {
 		http.Error(w, "graph required", http.StatusBadRequest)
@@ -192,7 +195,7 @@ func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	runID := "run_" + randID(6)
-	h, err := d.sched.Create(ctx, runID, req.Graph)
+	h, err := d.sched.Create(ctx, runID, req.Graph, sched.CreateOptions{AutoApproveGates: req.AutoApproveGates})
 	if err != nil {
 		http.Error(w, "invalid graph: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -274,8 +277,12 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		attempts[string(n.ID)] = atts
 	}
 	resp := map[string]any{
-		"runID": id, "status": ru.Status, "graph": ru.Graph,
-		"events": events, "attempts": attempts,
+		"runID":            id,
+		"status":           ru.Status,
+		"graph":            ru.Graph,
+		"autoApproveGates": ru.AutoApproveGates,
+		"events":           events,
+		"attempts":         attempts,
 	}
 	if h, ok := d.runs[id]; ok {
 		states := map[string]string{}
@@ -288,6 +295,111 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		resp["done"] = h.Done()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWatchRun long-polls a run for the orchestrator run loop. It
+// returns as soon as the run produces new events (milestones, a gate
+// awaiting approval, resolution, completion) or after the timeout, and
+// always carries the current snapshot: node states, gates awaiting
+// approval, whether the run is pre-authorized to auto-approve them, and
+// the event cursor to pass back as `since`.
+func (d *Daemon) handleWatchRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	q := r.URL.Query()
+	since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+	timeout := 60
+	if v := q.Get("timeout"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			timeout = n
+		}
+	}
+	if timeout < 1 {
+		timeout = 1
+	}
+	if timeout > 120 {
+		timeout = 120
+	}
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	ctx := r.Context()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		snap, changed, done, err := d.watchSnapshot(ctx, id, since)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if changed || done || time.Now().After(deadline) {
+			writeJSON(w, http.StatusOK, snap)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// watchSnapshot builds the watch response for a run. changed reports
+// whether any event happened after since; done whether the run settled.
+func (d *Daemon) watchSnapshot(ctx context.Context, id string, since int64) (map[string]any, bool, bool, error) {
+	ru, err := d.st.Run(ctx, id)
+	if err != nil {
+		return nil, false, false, err
+	}
+	events, err := d.st.Events(ctx, id)
+	if err != nil {
+		return nil, false, false, err
+	}
+	maxSeq := since
+	var newEvents []store.Event
+	for _, e := range events {
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+		if e.Seq > since {
+			newEvents = append(newEvents, e)
+		}
+	}
+
+	states := map[string]string{}
+	done := false
+	if h, ok := d.runs[id]; ok {
+		for _, n := range ru.Graph.Nodes {
+			if st, ok := h.State(n.ID); ok {
+				states[string(n.ID)] = string(st)
+			}
+		}
+		done = h.Done()
+	} else {
+		if ns, err := d.st.NodeStates(ctx, id); err == nil {
+			for nid, st := range ns {
+				states[string(nid)] = string(st)
+			}
+		}
+		done = ru.Status != "active"
+	}
+
+	var gates []string
+	for _, n := range ru.Graph.Nodes {
+		if n.Type == graph.NodeHuman && states[string(n.ID)] == string(graph.StateRunning) {
+			gates = append(gates, string(n.ID))
+		}
+	}
+
+	return map[string]any{
+		"runID":                 id,
+		"status":                ru.Status,
+		"done":                  done,
+		"autoApproveGates":      ru.AutoApproveGates,
+		"states":                states,
+		"gatesAwaitingApproval": gates,
+		"since":                 maxSeq,
+		"events":                newEvents,
+	}, len(newEvents) > 0, done, nil
 }
 
 func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, id graph.NodeID) error) {

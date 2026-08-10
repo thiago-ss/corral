@@ -67,7 +67,10 @@ export const plan = tool({
 
 export const start = tool({
   description: "Start a corral run from an approved graph.",
-  args: { graph: tool.schema.string().describe("Graph JSON (as returned by corral_plan)") },
+  args: {
+    graph: tool.schema.string().describe("Graph JSON (as returned by corral_plan)"),
+    autoApproveGates: tool.schema.boolean().optional().describe("When true, the run is pre-authorized: the orchestrator approves human gates itself as they are reached, without waiting for the operator"),
+  },
   async execute(args, context) {
     let graph: unknown
     try {
@@ -75,7 +78,9 @@ export const start = tool({
     } catch {
       return "error: graph is not valid JSON"
     }
-    return call("/api/runs", { graph }, roleFor(context.agent))
+    const body: Record<string, unknown> = { graph }
+    if (args.autoApproveGates !== undefined) body.autoApproveGates = args.autoApproveGates
+    return call("/api/runs", body, roleFor(context.agent))
   },
 })
 
@@ -86,6 +91,22 @@ export const status = tool({
   },
   async execute(args, context) {
     return call(args.runID ? `/api/runs/${args.runID}` : "/api/runs", undefined, roleFor(context.agent))
+  },
+})
+
+export const watch = tool({
+  description:
+    "Watch a corral run and block until its state changes (new events, a human gate awaiting approval, or completion) or the timeout elapses. Drive the run loop by calling this repeatedly and passing the previous response's `since` cursor back. `gatesAwaitingApproval` lists human gates parked in running waiting for a decision: if the response's `autoApproveGates` is true the run is pre-authorized and you should approve each gate via corral_approve; otherwise never approve them yourself — report them to the user and keep watching until they resolve.",
+  args: {
+    runID: tool.schema.string(),
+    since: tool.schema.number().optional().describe("Event cursor; only return events after this"),
+    timeout: tool.schema.number().optional().describe("Block for up to this many seconds (default 60, max 120)"),
+  },
+  async execute(args, context) {
+    const q = new URLSearchParams()
+    if (args.since !== undefined) q.set("since", String(args.since))
+    if (args.timeout !== undefined) q.set("timeout", String(args.timeout))
+    return call(`/api/runs/${args.runID}/watch?${q}`, undefined, roleFor(context.agent))
   },
 })
 

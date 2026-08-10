@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -58,10 +59,11 @@ type Attempt struct {
 }
 
 type Run struct {
-	ID        string       `json:"id"`
-	Graph     *graph.Graph `json:"graph"`
-	Status    string       `json:"status"` // active|completed|canceled
-	CreatedAt int64        `json:"createdAt"`
+	ID               string       `json:"id"`
+	Graph            *graph.Graph `json:"graph"`
+	Status           string       `json:"status"` // active|completed|canceled
+	AutoApproveGates bool         `json:"autoApproveGates"`
+	CreatedAt        int64        `json:"createdAt"`
 }
 
 // NodeRow is the materialized per-node state.
@@ -120,6 +122,7 @@ CREATE TABLE IF NOT EXISTS runs (
 	id        TEXT PRIMARY KEY,
 	graph     TEXT NOT NULL,
 	status    TEXT NOT NULL,
+	auto_approve_gates INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -175,10 +178,18 @@ CREATE TABLE IF NOT EXISTS artifacts (
 	PRIMARY KEY(run_id, attempt_id, name)
 );`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migrate databases created before the auto-approve-gates column.
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN auto_approve_gates INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
-func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now time.Time) error {
+func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, autoApproveGates bool, now time.Time) error {
 	gj, err := json.Marshal(g)
 	if err != nil {
 		return err
@@ -189,8 +200,8 @@ func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO runs(id, graph, status, created_at) VALUES(?, ?, 'active', ?)`,
-		runID, string(gj), now.UnixMilli()); err != nil {
+		`INSERT INTO runs(id, graph, status, auto_approve_gates, created_at) VALUES(?, ?, 'active', ?, ?)`,
+		runID, string(gj), boolInt(autoApproveGates), now.UnixMilli()); err != nil {
 		return err
 	}
 	for _, n := range g.Nodes {
@@ -209,12 +220,14 @@ func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now
 }
 
 func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, graph, status, created_at FROM runs WHERE id = ?`, runID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, graph, status, auto_approve_gates, created_at FROM runs WHERE id = ?`, runID)
 	var r Run
 	var gj string
-	if err := row.Scan(&r.ID, &gj, &r.Status, &r.CreatedAt); err != nil {
+	var auto int
+	if err := row.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 		return nil, err
 	}
+	r.AutoApproveGates = auto != 0
 	if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 		return nil, fmt.Errorf("decode graph: %w", err)
 	}
@@ -223,7 +236,7 @@ func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
 
 // ListRuns returns all runs with their status.
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, graph, status, created_at FROM runs ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, graph, status, auto_approve_gates, created_at FROM runs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -232,15 +245,24 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	for rows.Next() {
 		var r Run
 		var gj string
-		if err := rows.Scan(&r.ID, &gj, &r.Status, &r.CreatedAt); err != nil {
+		var auto int
+		if err := rows.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.AutoApproveGates = auto != 0
 		if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 			return nil, fmt.Errorf("decode graph: %w", err)
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (s *Store) CompleteRun(ctx context.Context, runID string, status string, now time.Time) error {
