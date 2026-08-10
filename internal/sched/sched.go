@@ -623,7 +623,11 @@ func (h *RunHandle) startCheck(ctx context.Context, n *graph.Node, attemptID str
 	}
 	exit, stdout, stderr, err := runner.Run(ctx, h.checkCwd(ctx, n), n.Verification.Command, timeout)
 	if err != nil && exit == 0 {
-		return fmt.Errorf("check node %s command failed to run: %w", n.ID, err)
+		// The command never ran (e.g. a missing binary). Fail the check
+		// gate with the real error as feedback instead of erroring the
+		// whole run.
+		stderr = "command failed to run: " + err.Error()
+		exit = 1
 	}
 	sess := &checkSession{id: "check:" + string(n.ID)}
 	started := now.UnixMilli()
@@ -782,7 +786,10 @@ func (h *RunHandle) startMerge(ctx context.Context, n *graph.Node, attemptID str
 	}
 	exit, stdout, stderr, err := runner.Run(ctx, wtm.Repo(), n.Verification.Command, timeout)
 	if err != nil && exit == 0 {
-		return fmt.Errorf("merge node %s verification failed to run: %w", n.ID, err)
+		// The verification command never ran (e.g. a missing binary).
+		// Surface it through the merge gate instead of erroring the run.
+		stderr = "verification failed to run: " + err.Error()
+		exit = 1
 	}
 	return h.completeInline(ctx, n, attemptID, no, now, exit, stdout, stderr, merged)
 }

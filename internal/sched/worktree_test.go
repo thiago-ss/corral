@@ -311,6 +311,35 @@ func TestMergeRunsOnlyAfterApproval(t *testing.T) {
 	}
 }
 
+// A merge whose post-merge verification command cannot be started (missing
+// binary) must fail the merge gate and let the run settle.
+func TestMergeFailsOnMissingVerificationBinary(t *testing.T) {
+	g := &graph.Graph{Nodes: []*graph.Node{
+		workerNode("w1", "a.txt", "A1", "a.txt"),
+		mergeNode("m", []string{"definitely-not-a-real-binary-xyz"}, "w1"),
+	}}
+	scripts := map[string][]sched.Script{
+		"w1": {{Delay: tick, Write: map[string]string{"a.txt": "A1"}}},
+	}
+	st, h, _, clk := setupIsolated(t, g, scripts)
+	ctx := context.Background()
+	for i := 0; i < 50 && !h.Done(); i++ {
+		if err := step(h, clk, ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !h.Done() {
+		t.Fatal("run must settle, not error, when the merge verification cannot start")
+	}
+	if st2, _ := h.State("m"); st2 != graph.StateFailed {
+		t.Fatalf("merge state = %s, want failed (missing verification binary)", st2)
+	}
+	atts := attemptsOf(t, st, "run-wt", "m")
+	if len(atts) == 0 || atts[len(atts)-1].Status != "failed" {
+		t.Fatalf("merge attempts wrong: %+v", atts)
+	}
+}
+
 func TestRejectedGateBlocksMerge(t *testing.T) {
 	g := &graph.Graph{Nodes: []*graph.Node{
 		workerNode("w1", "a.txt", "A1", "a.txt"),
