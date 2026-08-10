@@ -51,6 +51,12 @@ func (ExecRunner) Run(ctx context.Context, dir string, command []string, timeout
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if err != nil && cmd.ProcessState == nil {
+		// The command never started (missing binary, bad path, permission
+		// denied). Surface the real error instead of a phantom exit 0,
+		// which would let an evidence gate pass on a check that never ran.
+		return 0, stdout.String(), stderr.String(), err
+	}
 	exit := 0
 	if cmd.ProcessState != nil {
 		exit = cmd.ProcessState.ExitCode()

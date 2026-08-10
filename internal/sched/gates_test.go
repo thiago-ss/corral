@@ -173,6 +173,41 @@ func TestCheckNodeRunsCommandAndRetries(t *testing.T) {
 	}
 }
 
+// A check node whose command cannot even be started (missing binary) must
+// fail its evidence gate and let the run settle — never pass with a
+// phantom exit 0.
+func TestCheckNodeFailsGateOnMissingBinary(t *testing.T) {
+	st := newStore(t)
+	clk := fakeClock()
+	n := &graph.Node{
+		ID:           "lint",
+		Type:         graph.NodeCheck,
+		Objective:    "run linter",
+		Priority:     graph.PriorityNormal,
+		Verification: &graph.Verification{Kind: "command", Command: []string{"definitely-not-a-real-binary-xyz"}},
+		RetryPolicy:  graph.RetryPolicy{MaxRetries: 0, Backoff: tick},
+	}
+	// CheckRunner left nil so startCheck falls back to verify.ExecRunner,
+	// which reports the real start error.
+	drv := sched.NewFakeDriver(clk, nil)
+	s := newSched(t, st, drv, verifierFor(t, verify.New(t.TempDir())), clk, sched.Options{Concurrency: 1})
+	h, err := s.Create(context.Background(), "run-check-missing", &graph.Graph{Nodes: []*graph.Node{n}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(t, h, clk, 100)
+	if !h.Done() {
+		t.Fatal("run must settle, not error, when a check command cannot start")
+	}
+	if st2, _ := h.State("lint"); st2 != graph.StateFailed {
+		t.Fatalf("lint state = %s, want failed (missing binary must fail the gate)", st2)
+	}
+	atts, _ := st.Attempts(context.Background(), "run-check-missing", "lint")
+	if len(atts) != 1 || atts[0].Status != "failed" {
+		t.Fatalf("check attempts wrong: %+v", atts)
+	}
+}
+
 // --- helpers ---------------------------------------------------------
 
 type runResult struct {
