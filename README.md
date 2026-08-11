@@ -171,6 +171,7 @@ the seam for future executors.
 | `corral doctor` | Check OpenCode, Git, daemon, plugin, and config |
 | `corral update` | Install a newer GitHub release after a sanity check |
 | `corral export <runID>` | Print the full audit export |
+| `corral worktrees` | List attempt worktrees; `--prune` removes merged/removed and stale ones |
 
 `status`, `tui`, `doctor`, and `export` read the repository key automatically.
 
@@ -196,6 +197,13 @@ CORRAL_RUN_MAX_TOKENS=250000 \
 CORRAL_RUN_MAX_COST=50 \
 corral up
 ```
+
+`corral worktrees` works directly on git (no daemon, no key). It lists the
+worktrees kept after failed attempts — path, branch, HEAD, and last-activity
+time — and with `--prune` removes the ones that are safe to drop: branches
+already merged into the main checkout, and (with `--stale <duration>`, e.g.
+`24h`) worktrees idle longer than that. It never touches the main checkout;
+locked worktrees are left alone.
 
 ## Development
 

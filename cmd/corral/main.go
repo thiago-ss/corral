@@ -5,6 +5,7 @@
 //	corral init              one-command local initialization
 //	corral doctor            environment and daemon checks
 //	corral export <runID>    full audit export of a run
+//	corral worktrees         list attempt worktrees; --prune drops safe ones
 package main
 
 import (
@@ -62,7 +63,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: corral <daemon|tui|init|doctor|export> [flags]")
+		return fmt.Errorf("usage: corral <daemon|tui|init|doctor|export|worktrees> [flags]")
 	}
 	switch args[0] {
 	case "update":
@@ -95,8 +96,14 @@ func run(args []string) error {
 			out = args[3]
 		}
 		return exportCmd(args[1], out)
+	case "worktrees":
+		fs := flag.NewFlagSet("worktrees", flag.ExitOnError)
+		prune := fs.Bool("prune", false, "prune worktrees whose branch was merged or removed")
+		stale := fs.Duration("stale", 0, "with --prune, also prune worktrees idle longer than this (e.g. 24h, 72h)")
+		fs.Parse(args[1:])
+		return worktreesCmd(*prune, *stale)
 	default:
-		return fmt.Errorf("unknown command %q (try: daemon, tui, up, init, doctor, export, update)", args[0])
+		return fmt.Errorf("unknown command %q (try: daemon, tui, up, init, doctor, export, update, worktrees)", args[0])
 	}
 }
 
@@ -588,6 +595,57 @@ func exportCmd(runID, outFile string) error {
 	}
 	_, err = os.Stdout.Write(pretty.Bytes())
 	return err
+}
+
+// worktreesCmd lists the attempt worktrees kept after failed attempts
+// and, with --prune, removes ones that are safe to drop (merged or
+// removed branches, plus stale ones beyond --stale). The main checkout
+// is never touched.
+func worktreesCmd(prune bool, stale time.Duration) error {
+	return worktreesCmdWithDir(dirOf(""), prune, stale)
+}
+
+func worktreesCmdWithDir(dir string, prune bool, stale time.Duration) error {
+	wtm := worktree.NewManager(dir)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if prune {
+		removed, err := wtm.Prune(ctx, stale, time.Now())
+		if err != nil {
+			return err
+		}
+		if len(removed) == 0 {
+			fmt.Println("nothing to prune")
+			return nil
+		}
+		for _, p := range removed {
+			fmt.Println("pruned", p)
+		}
+		return nil
+	}
+	infos, err := wtm.List(ctx)
+	if err != nil {
+		return err
+	}
+	if len(infos) == 0 {
+		fmt.Println("no attempt worktrees")
+		return nil
+	}
+	for _, info := range infos {
+		mark := ""
+		if info.Locked {
+			mark = " locked"
+		}
+		fmt.Printf("%-42s %-28s %-7s %s%s\n", info.Path, info.Branch, shortHead(info.Head), info.Mtime.Format("2006-01-02 15:04"), mark)
+	}
+	return nil
+}
+
+func shortHead(h string) string {
+	if len(h) > 7 {
+		return h[:7]
+	}
+	return h
 }
 
 func versionAtLeast(v, min string) bool {
