@@ -148,17 +148,38 @@ func TestDoctorPassesWithDaemonUp(t *testing.T) {
 }
 
 func TestExportCommand(t *testing.T) {
-	// Fake daemon serving a minimal export.
+	// Fake daemon serving a minimal export and recording the bearer key.
 	payload := `{"runID":"run_1","status":"completed","events":[],"attempts":{},"artifacts":{}}`
+	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		w.Write([]byte(payload))
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CORRAL_DAEMON_URL", srv.URL)
+	t.Setenv("CORRAL_DAEMON_KEY", "")
 
-	outFile := filepath.Join(t.TempDir(), "audit.json")
+	// Serve the key from the repository, as status/tui/doctor do.
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".corral"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, ".corral", "api.key"), []byte("repo-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	outFile := filepath.Join(dir, "audit.json")
 	if err := exportCmd("run_1", outFile); err != nil {
 		t.Fatalf("export: %v", err)
+	}
+	if gotKey != "repo-key" {
+		t.Fatalf("export used key %q, want repo key from .corral/api.key", gotKey)
 	}
 	data, err := os.ReadFile(outFile)
 	if err != nil {
@@ -166,6 +187,31 @@ func TestExportCommand(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"runID": "run_1"`) {
 		t.Fatalf("export file wrong: %s", data)
+	}
+}
+
+func TestExportCommandEnvOverride(t *testing.T) {
+	// The env var must still override the repository key.
+	payload := `{"runID":"run_1","status":"completed","events":[],"attempts":{},"artifacts":{}}`
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		w.Write([]byte(payload))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("CORRAL_DAEMON_URL", srv.URL)
+	t.Setenv("CORRAL_DAEMON_KEY", "env-key")
+
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".corral"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".corral", "api.key"), []byte("repo-key\n"), 0o600)
+
+	outFile := filepath.Join(dir, "audit.json")
+	if err := exportCmd("run_1", outFile); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if gotKey != "env-key" {
+		t.Fatalf("export used key %q, want env override", gotKey)
 	}
 }
 

@@ -564,7 +564,11 @@ func doctorWithURL(wantDir, url string) error {
 }
 
 func exportCmd(runID, outFile string) error {
-	client := tui.NewClient(daemonURL(), os.Getenv("CORRAL_DAEMON_KEY"))
+	key, err := readKey(dirOf(""))
+	if err != nil {
+		return err
+	}
+	client := tui.NewClient(daemonURL(), key)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var payload json.RawMessage
@@ -582,7 +586,7 @@ func exportCmd(runID, outFile string) error {
 		fmt.Printf("audit export written to %s\n", outFile)
 		return nil
 	}
-	_, err := os.Stdout.Write(pretty.Bytes())
+	_, err = os.Stdout.Write(pretty.Bytes())
 	return err
 }
 

@@ -172,13 +172,7 @@ the seam for future executors.
 | `corral update` | Install a newer GitHub release after a sanity check |
 | `corral export <runID>` | Print the full audit export |
 
-`status`, `tui`, and `doctor` read the repository key automatically. Until the
-export command does the same, use:
-
-```sh
-CORRAL_DAEMON_KEY="$(cat .corral/api.key)" \
-  corral export <runID> > audit.json
-```
+`status`, `tui`, `doctor`, and `export` read the repository key automatically.
 
 ### Run-level safeguards
 
