@@ -73,7 +73,7 @@ func (c *Client) CreateSession(ctx context.Context, title string) (Session, erro
 }
 
 func (c *Client) PromptAsync(ctx context.Context, sid, text, model string) error {
-	return c.PromptAsyncWithTools(ctx, sid, text, model, nil)
+	return c.promptAsync(ctx, sid, text, model, "", nil)
 }
 
 // PromptAsyncWithTools sends an async prompt with an optional tool
@@ -81,11 +81,32 @@ func (c *Client) PromptAsync(ctx context.Context, sid, text, model string) error
 // session so the agent cannot call them (e.g. planner sessions get no
 // bash/edit).
 func (c *Client) PromptAsyncWithTools(ctx context.Context, sid, text, model string, tools map[string]bool) error {
+	return c.promptAsync(ctx, sid, text, model, "", tools)
+}
+
+// PromptAsyncAgent sends an async prompt running under a named agent
+// (e.g. "corral-orchestrator"), so the session inherits that agent's
+// system prompt and tool permissions.
+func (c *Client) PromptAsyncAgent(ctx context.Context, sid, text, model, agent string) error {
+	return c.promptAsync(ctx, sid, text, model, agent, nil)
+}
+
+// PromptAsyncAgentWithTools is PromptAsyncAgent plus a tool allowlist.
+func (c *Client) PromptAsyncAgentWithTools(ctx context.Context, sid, text, model, agent string, tools map[string]bool) error {
+	return c.promptAsync(ctx, sid, text, model, agent, tools)
+}
+
+// promptAsync is the shared prompt_async caller; agent and tools are
+// optional session overrides.
+func (c *Client) promptAsync(ctx context.Context, sid, text, model, agent string, tools map[string]bool) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	if model != "" {
 		body["model"] = model
+	}
+	if agent != "" {
+		body["agent"] = agent
 	}
 	if tools != nil {
 		body["tools"] = tools

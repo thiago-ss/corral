@@ -195,7 +195,7 @@ func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	runID := "run_" + randID(6)
-	h, err := d.sched.CreateWithOptions(ctx, runID, req.Graph, sched.RunOptions{AutoApproveGates: req.AutoApproveGates})
+	h, err := d.sched.Create(ctx, runID, req.Graph, sched.CreateOptions{AutoApproveGates: req.AutoApproveGates})
 	if err != nil {
 		http.Error(w, "invalid graph: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -277,9 +277,12 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		attempts[string(n.ID)] = atts
 	}
 	resp := map[string]any{
-		"runID": id, "status": ru.Status, "graph": ru.Graph,
+		"runID":            id,
+		"status":           ru.Status,
+		"graph":            ru.Graph,
 		"autoApproveGates": ru.AutoApproveGates,
-		"events":           events, "attempts": attempts,
+		"events":           events,
+		"attempts":         attempts,
 	}
 	if h, ok := d.runs[id]; ok {
 		states := map[string]string{}
@@ -294,152 +297,109 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// watchFrame is one SSE frame of the run watch stream. Every frame is a
-// delta: a store event (enriched with gate/awaitingApproval when the node
-// is a human gate) or the terminal run-done notification.
-type watchFrame struct {
-	Seq              int64  `json:"seq"`
-	Type             string `json:"type"` // "event" | "done"
-	RunID            string `json:"runID"`
-	Event            string `json:"event,omitempty"`
-	NodeID           string `json:"nodeID,omitempty"`
-	From             string `json:"from,omitempty"`
-	To               string `json:"to,omitempty"`
-	AttemptID        string `json:"attemptID,omitempty"`
-	Gate             bool   `json:"gate,omitempty"`
-	AwaitingApproval bool   `json:"awaitingApproval,omitempty"`
-	Status           string `json:"status,omitempty"`
-	Payload          string `json:"payload,omitempty"`
-}
-
-// handleWatchRun streams the run's event log as Server-Sent Events, one
-// frame per delta after the `after` sequence number (default 0). Frames
-// carry node transitions, flag human gates awaiting approval, and emit a
-// final "done" frame once the run settles. The stream closes on client
-// disconnect or when the run is done and every pending event was sent.
+// handleWatchRun long-polls a run for the orchestrator run loop. It
+// returns as soon as the run produces new events (milestones, a gate
+// awaiting approval, resolution, completion) or after the timeout, and
+// always carries the current snapshot: node states, gates awaiting
+// approval, whether the run is pre-authorized to auto-approve them, and
+// the event cursor to pass back as `since`.
 func (d *Daemon) handleWatchRun(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	id := r.PathValue("id")
-	if _, err := d.st.Run(ctx, id); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	fl, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	after := int64(0)
-	if v := r.URL.Query().Get("after"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			after = n
+	q := r.URL.Query()
+	since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+	timeout := 60
+	if v := q.Get("timeout"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			timeout = n
 		}
 	}
-
-	// Which nodes are human gates, so transitions to running can be
-	// flagged as awaiting operator approval.
-	isGate := map[string]bool{}
-	if ru, err := d.st.Run(ctx, id); err == nil {
-		for _, n := range ru.Graph.Nodes {
-			isGate[string(n.ID)] = n.Type == graph.NodeHuman
-		}
+	if timeout < 1 {
+		timeout = 1
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	fl.Flush()
-
-	writeSSE := func(v any) error {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return err
-		}
-		fl.Flush()
-		return nil
+	if timeout > 120 {
+		timeout = 120
 	}
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
 
-	doneSent := false
+	ctx := r.Context()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
+		snap, changed, done, err := d.watchSnapshot(ctx, id, since)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if changed || done || time.Now().After(deadline) {
+			writeJSON(w, http.StatusOK, snap)
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-d.ctx.Done():
-			return
-		default:
+		case <-ticker.C:
 		}
-		events, err := d.st.Events(ctx, id)
-		if err != nil {
-			return
-		}
-		last := after
-		for _, ev := range events {
-			if ev.Seq <= after {
-				continue
-			}
-			last = ev.Seq
-			frame := watchFrame{
-				Seq:       ev.Seq,
-				Type:      "event",
-				RunID:     id,
-				Event:     string(ev.Type),
-				NodeID:    ev.NodeID,
-				From:      string(ev.From),
-				To:        string(ev.To),
-				AttemptID: ev.AttemptID,
-				Payload:   string(ev.Payload),
-			}
-			if ev.NodeID != "" && isGate[ev.NodeID] {
-				frame.Gate = true
-				if ev.Type == store.EventTransition && ev.To == graph.StateRunning {
-					frame.AwaitingApproval = true
-				}
-			}
-			if err := writeSSE(frame); err != nil {
-				return
-			}
-		}
-		after = last
-
-		if d.runDone(ctx, id) && !doneSent {
-			doneSent = true
-			if err := writeSSE(watchFrame{
-				Seq:    after,
-				Type:   "done",
-				RunID:  id,
-				Status: d.runStatus(ctx, id),
-			}); err != nil {
-				return
-			}
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-// runDone reports whether the run has settled (completed or waiting for a
-// human decision). In-memory handles expose Done(); persisted runs without
-// a live handle are done when their stored status is terminal.
-func (d *Daemon) runDone(ctx context.Context, id string) bool {
-	d.mu.Lock()
-	h, live := d.runs[id]
-	d.mu.Unlock()
-	if live {
-		return h.Done()
-	}
-	ru, err := d.st.Run(ctx, id)
-	return err == nil && (ru.Status == "completed" || ru.Status == "waiting")
-}
-
-func (d *Daemon) runStatus(ctx context.Context, id string) string {
+// watchSnapshot builds the watch response for a run. changed reports
+// whether any event happened after since; done whether the run settled.
+func (d *Daemon) watchSnapshot(ctx context.Context, id string, since int64) (map[string]any, bool, bool, error) {
 	ru, err := d.st.Run(ctx, id)
 	if err != nil {
-		return ""
+		return nil, false, false, err
 	}
-	return ru.Status
+	events, err := d.st.Events(ctx, id)
+	if err != nil {
+		return nil, false, false, err
+	}
+	maxSeq := since
+	var newEvents []store.Event
+	for _, e := range events {
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+		if e.Seq > since {
+			newEvents = append(newEvents, e)
+		}
+	}
+
+	states := map[string]string{}
+	done := false
+	if h, ok := d.runs[id]; ok {
+		for _, n := range ru.Graph.Nodes {
+			if st, ok := h.State(n.ID); ok {
+				states[string(n.ID)] = string(st)
+			}
+		}
+		done = h.Done()
+	} else {
+		if ns, err := d.st.NodeStates(ctx, id); err == nil {
+			for nid, st := range ns {
+				states[string(nid)] = string(st)
+			}
+		}
+		done = ru.Status != "active"
+	}
+
+	var gates []string
+	for _, n := range ru.Graph.Nodes {
+		if n.Type == graph.NodeHuman && states[string(n.ID)] == string(graph.StateRunning) {
+			gates = append(gates, string(n.ID))
+		}
+	}
+
+	return map[string]any{
+		"runID":                 id,
+		"status":                ru.Status,
+		"done":                  done,
+		"autoApproveGates":      ru.AutoApproveGates,
+		"states":                states,
+		"gatesAwaitingApproval": gates,
+		"since":                 maxSeq,
+		"events":                newEvents,
+	}, len(newEvents) > 0, done, nil
 }
 
 func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, id graph.NodeID) error) {

@@ -39,7 +39,7 @@ func TestSecretsNeverPersisted(t *testing.T) {
 	g := &graph.Graph{Nodes: []*graph.Node{{
 		ID: "w1", Type: graph.NodeAgent, Objective: "o", AcceptanceCriteria: []string{"c"},
 	}}}
-	if err := st.CreateRun(ctx, "r1", g, time.Now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", g, false, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	secret := "Bearer sk-verysecretkey1234567890abcdef"

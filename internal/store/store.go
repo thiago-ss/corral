@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -176,56 +177,19 @@ CREATE TABLE IF NOT EXISTS artifacts (
 	content TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY(run_id, attempt_id, name)
 );`
-	if _, err := db.Exec(schema); err != nil {
-		return err
-	}
-	// Migrate pre-existing databases: the auto-approve column is added
-	// when it is missing (CREATE TABLE IF NOT EXISTS does not alter an
-	// existing table).
-	ok, err := columnExists(db, "runs", "auto_approve_gates")
+	_, err := db.Exec(schema)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		if _, err := db.Exec("ALTER TABLE runs ADD COLUMN auto_approve_gates INTEGER NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
+	// Migrate databases created before the auto-approve-gates column.
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN auto_approve_gates INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
 	}
 	return nil
 }
 
-// columnExists reports whether table has column.
-func columnExists(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, ctype string
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now time.Time) error {
-	return s.createRun(ctx, runID, g, false, now)
-}
-
-// CreateRunWithOpts creates a run with scheduler options (auto-approving
-// human gates) persisted on the run row.
-func (s *Store) CreateRunWithOpts(ctx context.Context, runID string, g *graph.Graph, autoApproveGates bool, now time.Time) error {
-	return s.createRun(ctx, runID, g, autoApproveGates, now)
-}
-
-func (s *Store) createRun(ctx context.Context, runID string, g *graph.Graph, autoApproveGates bool, now time.Time) error {
+func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, autoApproveGates bool, now time.Time) error {
 	gj, err := json.Marshal(g)
 	if err != nil {
 		return err
@@ -235,13 +199,9 @@ func (s *Store) createRun(ctx context.Context, runID string, g *graph.Graph, aut
 		return err
 	}
 	defer tx.Rollback()
-	autoApprove := 0
-	if autoApproveGates {
-		autoApprove = 1
-	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO runs(id, graph, status, auto_approve_gates, created_at) VALUES(?, ?, 'active', ?, ?)`,
-		runID, string(gj), autoApprove, now.UnixMilli()); err != nil {
+		runID, string(gj), boolInt(autoApproveGates), now.UnixMilli()); err != nil {
 		return err
 	}
 	for _, n := range g.Nodes {
@@ -263,14 +223,14 @@ func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, graph, status, auto_approve_gates, created_at FROM runs WHERE id = ?`, runID)
 	var r Run
 	var gj string
-	var autoApprove int
-	if err := row.Scan(&r.ID, &gj, &r.Status, &autoApprove, &r.CreatedAt); err != nil {
+	var auto int
+	if err := row.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 		return nil, err
 	}
+	r.AutoApproveGates = auto != 0
 	if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 		return nil, fmt.Errorf("decode graph: %w", err)
 	}
-	r.AutoApproveGates = autoApprove != 0
 	return &r, nil
 }
 
@@ -285,17 +245,24 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	for rows.Next() {
 		var r Run
 		var gj string
-		var autoApprove int
-		if err := rows.Scan(&r.ID, &gj, &r.Status, &autoApprove, &r.CreatedAt); err != nil {
+		var auto int
+		if err := rows.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.AutoApproveGates = auto != 0
 		if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 			return nil, fmt.Errorf("decode graph: %w", err)
 		}
-		r.AutoApproveGates = autoApprove != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (s *Store) CompleteRun(ctx context.Context, runID string, status string, now time.Time) error {

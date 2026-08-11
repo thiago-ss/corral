@@ -26,7 +26,7 @@ const OpenAPI = `{
       "get": {"responses": {"200": {"description": "run detail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunDetail"}}}}}}
     },
     "/api/runs/{id}/watch": {
-      "get": {"responses": {"200": {"description": "server-sent event stream of run deltas", "content": {"text/event-stream": {"schema": {"$ref": "#/components/schemas/WatchEvent"}}}}}}
+      "get": {"parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "timeout", "in": "query", "schema": {"type": "integer"}}], "responses": {"200": {"description": "run snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WatchResponse"}}}}}}
     },
     "/api/runs/{id}/approve": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/reject": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
@@ -43,13 +43,6 @@ const OpenAPI = `{
       "Ok": {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}},
       "PlanResponse": {"type": "object", "required": ["graph"], "properties": {"graph": {"$ref": "#/components/schemas/Graph"}}},
       "CreateRunResponse": {"type": "object", "required": ["runID"], "properties": {"runID": {"type": "string"}}},
-      "CreateRunRequest": {
-        "type": "object", "required": ["graph"],
-        "properties": {
-          "graph": {"$ref": "#/components/schemas/Graph"},
-          "autoApproveGates": {"type": "boolean", "description": "approve human gates automatically instead of waiting for an operator"}
-        }
-      },
       "RunSummary": {
         "type": "object", "required": ["id", "status"],
         "properties": {
@@ -122,28 +115,22 @@ const OpenAPI = `{
         "type": "object", "required": ["runID"],
         "properties": {
           "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
-          "autoApproveGates": {"type": "boolean"},
           "graph": {"$ref": "#/components/schemas/Graph"},
+          "autoApproveGates": {"type": "boolean"},
           "states": {"type": "object", "additionalProperties": {"type": "string"}},
           "attempts": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/components/schemas/Attempt"}}},
           "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
         }
       },
-      "WatchEvent": {
-        "type": "object", "required": ["seq", "type", "runID"],
+      "WatchResponse": {
+        "type": "object", "required": ["runID"],
         "properties": {
-          "seq": {"type": "integer"},
-          "type": {"type": "string", "enum": ["event", "done"]},
-          "runID": {"type": "string"},
-          "event": {"type": "string"},
-          "nodeID": {"type": "string"},
-          "from": {"type": "string"},
-          "to": {"type": "string"},
-          "attemptID": {"type": "string"},
-          "gate": {"type": "boolean"},
-          "awaitingApproval": {"type": "boolean"},
-          "status": {"type": "string"},
-          "payload": {"type": "string"}
+          "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
+          "autoApproveGates": {"type": "boolean"},
+          "states": {"type": "object", "additionalProperties": {"type": "string"}},
+          "gatesAwaitingApproval": {"type": "array", "items": {"type": "string"}},
+          "since": {"type": "integer"},
+          "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
         }
       },
       "Export": {
