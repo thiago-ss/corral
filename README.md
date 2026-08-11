@@ -168,6 +168,7 @@ the seam for future executors.
 | `corral doctor` | Check OpenCode, Git, daemon, plugin, and config |
 | `corral update` | Install a newer GitHub release after a sanity check |
 | `corral export <runID>` | Print the full audit export |
+| `corral worktrees` | List attempt worktrees; `--prune` removes merged/removed and stale ones |
 
 `status`, `tui`, and `doctor` read the repository key automatically. Until the
 export command does the same, use:
@@ -176,6 +177,13 @@ export command does the same, use:
 CORRAL_DAEMON_KEY="$(cat .corral/api.key)" \
   corral export <runID> > audit.json
 ```
+
+`corral worktrees` works directly on git (no daemon, no key). It lists the
+worktrees kept after failed attempts — path, branch, HEAD, and last-activity
+time — and with `--prune` removes the ones that are safe to drop: branches
+already merged into the main checkout, and (with `--stale <duration>`, e.g.
+`24h`) worktrees idle longer than that. It never touches the main checkout;
+locked worktrees are left alone.
 
 ## Development
 

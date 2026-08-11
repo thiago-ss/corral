@@ -16,6 +16,7 @@ import (
 
 	"corral/internal/livetest"
 	"corral/internal/tui"
+	"corral/internal/worktree"
 )
 
 // captureOutput runs fn with stdout redirected and returns its output.
@@ -257,6 +258,84 @@ func TestUpCmdSpawnsHealthyDaemon(t *testing.T) {
 	}
 	// Kill it.
 	_ = exec.Command("pkill", "-f", "corral daemon --port "+fmt.Sprint(port)).Run()
+}
+
+func TestWorktreesCommand(t *testing.T) {
+	repo := gitRepo(t)
+	ctx := context.Background()
+	wtm := worktree.NewManager(repo)
+	path, err := wtm.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureOutput(t, func() { err = worktreesCmdWithDir(repo, false, 0) })
+	if err != nil {
+		t.Fatalf("worktrees: %v", err)
+	}
+	if !strings.Contains(out, "corral/r1/w1/1") {
+		t.Fatalf("listing missing branch:\n%s", out)
+	}
+	if strings.Contains(out, "pruned") {
+		t.Fatalf("listing pruned unexpectedly:\n%s", out)
+	}
+
+	// Nothing is merged or stale, so --prune removes nothing.
+	out = captureOutput(t, func() { err = worktreesCmdWithDir(repo, true, 0) })
+	if err != nil {
+		t.Fatalf("worktrees --prune: %v", err)
+	}
+	if !strings.Contains(out, "nothing to prune") {
+		t.Fatalf("prune output wrong:\n%s", out)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("worktree dir removed: %v", err)
+	}
+}
+
+func TestWorktreesCommandPrunesMerged(t *testing.T) {
+	repo := gitRepo(t)
+	ctx := context.Background()
+	wtm := worktree.NewManager(repo)
+	path, err := wtm.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := wtm.CommitWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := wtm.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureOutput(t, func() { err = worktreesCmdWithDir(repo, true, 0) })
+	if err != nil {
+		t.Fatalf("worktrees --prune: %v", err)
+	}
+	if !strings.Contains(out, "pruned") || !strings.Contains(out, "corral/r1/w1/1") {
+		t.Fatalf("prune output wrong:\n%s", out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("merged worktree dir not removed: %v", err)
+	}
+	// Main checkout untouched.
+	if data, err := os.ReadFile(filepath.Join(repo, "a.txt")); err != nil || string(data) != "hello" {
+		t.Fatalf("main checkout wrong: %v %q", err, data)
+	}
+}
+
+func TestWorktreesCommandEmpty(t *testing.T) {
+	repo := gitRepo(t)
+	out := captureOutput(t, func() { _ = worktreesCmdWithDir(repo, false, 0) })
+	if !strings.Contains(out, "no attempt worktrees") {
+		t.Fatalf("empty listing output wrong:\n%s", out)
+	}
 }
 
 func TestVersionAtLeast(t *testing.T) {
