@@ -58,13 +58,14 @@ type AttemptView struct {
 }
 
 type EventView struct {
-	Seq       int64  `json:"seq"`
-	NodeID    string `json:"nodeID,omitempty"`
-	Type      string `json:"type"`
-	From      string `json:"from,omitempty"`
-	To        string `json:"to,omitempty"`
-	AttemptID string `json:"attemptID,omitempty"`
-	CreatedAt int64  `json:"createdAt"`
+	Seq       int64           `json:"seq"`
+	NodeID    string          `json:"nodeID,omitempty"`
+	Type      string          `json:"type"`
+	From      string          `json:"from,omitempty"`
+	To        string          `json:"to,omitempty"`
+	AttemptID string          `json:"attemptID,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt int64           `json:"createdAt"`
 }
 
 type RunDetail struct {
@@ -86,6 +87,7 @@ type API interface {
 	Cancel(ctx context.Context, runID, nodeID string) error
 	Retry(ctx context.Context, runID, nodeID string) error
 	Steer(ctx context.Context, runID, nodeID, message string) error
+	RespondPermission(ctx context.Context, runID, nodeID, permissionID string, allow bool) error
 }
 
 // Client talks to a corral daemon over HTTP.
@@ -168,6 +170,10 @@ func (c *Client) Retry(ctx context.Context, runID, nodeID string) error {
 }
 func (c *Client) Steer(ctx context.Context, runID, nodeID, message string) error {
 	return c.do(ctx, http.MethodPost, "/api/runs/"+runID+"/steer", map[string]string{"nodeID": nodeID, "message": message}, nil)
+}
+func (c *Client) RespondPermission(ctx context.Context, runID, nodeID, permissionID string, allow bool) error {
+	return c.do(ctx, http.MethodPost, "/api/runs/"+runID+"/permission",
+		map[string]any{"nodeID": nodeID, "permissionID": permissionID, "allow": allow}, nil)
 }
 
 func truncate(s string, n int) string {

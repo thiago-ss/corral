@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -154,4 +155,83 @@ func TestClientAgainstDaemon(t *testing.T) {
 	if !strings.Contains(dd.Events[0].Type, "") {
 		t.Fatalf("events missing")
 	}
+}
+
+// TestClientRespondPermission drives a permission-blocked node through the
+// daemon: the client's RespondPermission allows it and the node completes.
+func TestClientRespondPermission(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	workdir := t.TempDir()
+	drv := sched.NewFakeDriver(clock.Real{}, nil)
+	eng := verify.New(workdir)
+	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{Concurrency: 2})
+	d := daemon.New(st, s, nil, t.TempDir(), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.SetContext(ctx)
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL, "")
+	client.Role = "operator"
+
+	g := &graph.Graph{Nodes: []*graph.Node{{
+		ID: "w1", Type: graph.NodeAgent, Role: "worker",
+		Objective: "write a.txt", AcceptanceCriteria: []string{"a.txt"},
+		Priority: graph.PriorityNormal, WriteScope: []string{"a.txt"},
+		Verification: &graph.Verification{Kind: "command", Command: []string{"test", "-f", "a.txt"}},
+		Meta:         map[string]string{"cwd": workdir},
+	}}}
+	drv.SetScript("w1", sched.Script{Delay: 5 * time.Second, Permission: "perm-9", Write: map[string]string{"a.txt": "A"}})
+	var created struct{ RunID string }
+	if err := client.do(ctx, "POST", "/api/runs", map[string]any{"graph": g}, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		dd, err := client.GetRun(ctx, created.RunID)
+		if err == nil && dd.States["w1"] == "blocked" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The pending permission is visible in the detail payload.
+	dd, err := client.GetRun(ctx, created.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := ""
+	for _, ev := range dd.Events {
+		if ev.NodeID == "w1" && ev.To == "blocked" {
+			var p struct {
+				Reason       string `json:"reason"`
+				PermissionID string `json:"permissionID"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				pid = p.PermissionID
+			}
+		}
+	}
+	if pid != "perm-9" {
+		t.Fatalf("blocked payload permissionID = %q, want perm-9", pid)
+	}
+
+	if err := client.RespondPermission(ctx, created.RunID, "w1", "perm-9", true); err != nil {
+		t.Fatalf("respond permission: %v", err)
+	}
+	for time.Now().Before(deadline) {
+		dd, _ := client.GetRun(ctx, created.RunID)
+		if dd != nil && dd.States["w1"] == "done" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("node never done after permission allowed")
 }

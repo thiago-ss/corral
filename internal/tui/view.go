@@ -111,7 +111,7 @@ func (m *Model) viewDetail() string {
 			}
 		}
 	}
-	b.WriteString("\n" + m.footer("↑/↓ node · a approve · r reject · c cancel · t retry · s steer · i inspect · esc back · q quit"))
+	b.WriteString("\n" + m.footer("↑/↓ node · a approve · r reject · c cancel · t retry · s steer · p allow perm · d deny perm · i inspect · esc back · q quit"))
 	return b.String()
 }
 
@@ -126,7 +126,13 @@ func (m *Model) nodeLine(n GraphNode, deps int) string {
 	if deps > 0 {
 		depsS = styleDim.Render(fmt.Sprintf("(%d deps)", deps))
 	}
-	return fmt.Sprintf("%-12s %s %-7s %s %s %s", n.ID, st, typ, prio, attempts, depsS)
+	permS := ""
+	if state == "blocked" {
+		if pid, ok := m.pendingPermission(n.ID); ok {
+			permS = styleTitle.Render(fmt.Sprintf("perm:%s", pid))
+		}
+	}
+	return fmt.Sprintf("%-12s %s %-7s %s %s %s %s", n.ID, st, typ, prio, attempts, depsS, permS)
 }
 
 func (m *Model) viewInspect() string {
@@ -150,6 +156,9 @@ func (m *Model) viewInspect() string {
 	if n.Verification != nil {
 		b.WriteString(styleDim.Render("verification: ") + n.Verification.Kind + " " + strings.Join(n.Verification.Command, " ") + "\n")
 	}
+	if pid, ok := m.pendingPermission(n.ID); ok {
+		b.WriteString(styleDim.Render("permission: ") + styleTitle.Render(pid) + styleMuted.Render(" pending — p allow · d deny") + "\n")
+	}
 	b.WriteString("\n" + styleDim.Render("attempts") + "\n")
 	for _, at := range m.detail.Attempts[n.ID] {
 		b.WriteString(fmt.Sprintf("  #%d %-10s", at.No, stateColor(at.Status).Render(at.Status)))
@@ -170,7 +179,7 @@ func (m *Model) viewInspect() string {
 			b.WriteString(styleMuted.Render("     evidence: "+shortLine(at.Evidence, 90)) + "\n")
 		}
 	}
-	b.WriteString("\n" + m.footer("esc back · ↑/↓ navigate · a/r/c/t/s act"))
+	b.WriteString("\n" + m.footer("esc back · ↑/↓ navigate · a/r/c/t/s act · p/d respond perm"))
 	return b.String()
 }
 
