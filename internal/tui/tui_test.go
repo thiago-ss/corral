@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -42,6 +43,10 @@ func (f *fakeAPI) Cancel(ctx context.Context, r, n string) error  { f.act("cance
 func (f *fakeAPI) Retry(ctx context.Context, r, n string) error   { f.act("retry:" + n); return nil }
 func (f *fakeAPI) Steer(ctx context.Context, r, n, m string) error {
 	f.act("steer:" + n + ":" + m)
+	return nil
+}
+func (f *fakeAPI) RespondPermission(ctx context.Context, r, n, pid string, allow bool) error {
+	f.act(fmt.Sprintf("perm:%s:%s:%v", pid, n, allow))
 	return nil
 }
 
@@ -173,6 +178,46 @@ func TestNodeActions(t *testing.T) {
 	send(t, m, key("enter"))
 	if len(api.actions) != 5 || api.actions[4] != "steer:gate:focus on alpha" {
 		t.Fatalf("steer action = %v", api.actions)
+	}
+}
+
+func TestPermissionRespond(t *testing.T) {
+	d := sampleDetail()
+	// w1 is blocked on a permission request carried by its transition.
+	d.States["w1"] = "blocked"
+	d.Events = append(d.Events, EventView{
+		Seq: 2, NodeID: "w1", Type: "transition", From: "running", To: "blocked",
+		Payload: json.RawMessage(`{"reason":"permission","permissionID":"perm-9"}`),
+	})
+	api := &fakeAPI{}
+	m := New(api, context.Background())
+	m.runs = []RunSummary{{ID: "run_1"}}
+	m.selectedID = "run_1"
+	m.detail = d
+	m.mode = modeDetail
+	m.nodeCursor = 0 // w1
+
+	// The pending permission is surfaced in the detail view.
+	view := m.View()
+	for _, want := range []string{"perm:perm-9", "p allow perm", "d deny perm"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("detail view missing %q:\n%s", want, view)
+		}
+	}
+
+	send(t, m, key("p"))
+	send(t, m, key("d"))
+	want := []string{"perm:perm-9:w1:true", "perm:perm-9:w1:false"}
+	if fmt.Sprint(api.actions) != fmt.Sprint(want) {
+		t.Fatalf("actions = %v, want %v", api.actions, want)
+	}
+
+	// 'p'/'d' are no-ops on a node with no pending permission (the gate).
+	m.nodeCursor = 1
+	send(t, m, key("p"))
+	send(t, m, key("d"))
+	if len(api.actions) != 2 {
+		t.Fatalf("permission keys acted on non-permission node: %v", api.actions)
 	}
 }
 

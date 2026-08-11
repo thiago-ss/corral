@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -215,6 +216,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.nodeAction("canceled", m.api.Cancel)
 		case "t":
 			return m, m.nodeAction("retried", m.api.Retry)
+		case "p":
+			return m, m.permissionAction("allowed", true)
+		case "d":
+			return m, m.permissionAction("denied", false)
 		case "s":
 			if id, ok := m.nodeAt(m.nodeCursor); ok {
 				m.steerNode = id
@@ -246,6 +251,49 @@ func (m *Model) nodeAction(label string, fn func(context.Context, string, string
 	m.status = fmt.Sprintf("%s %s/%s", label, runID, id)
 	return actionCmd(m, label, func(ctx context.Context) error {
 		return fn(ctx, runID, id)
+	})
+}
+
+// pendingPermission returns the permission id the node is currently blocked
+// on, if its latest blocked transition carried a permission request.
+func (m *Model) pendingPermission(nodeID string) (string, bool) {
+	if m.detail == nil {
+		return "", false
+	}
+	pid := ""
+	for _, ev := range m.detail.Events {
+		if ev.NodeID != nodeID || ev.To != "blocked" || len(ev.Payload) == 0 {
+			continue
+		}
+		var p struct {
+			Reason       string `json:"reason"`
+			PermissionID string `json:"permissionID"`
+		}
+		if json.Unmarshal(ev.Payload, &p) == nil && p.Reason == "permission" && p.PermissionID != "" {
+			pid = p.PermissionID
+		}
+	}
+	if pid == "" {
+		return "", false
+	}
+	return pid, true
+}
+
+// permissionAction answers the pending permission of the node under the
+// cursor; it is a no-op unless the node is blocked on a permission.
+func (m *Model) permissionAction(label string, allow bool) tea.Cmd {
+	id, ok := m.nodeAt(m.nodeCursor)
+	if !ok {
+		return nil
+	}
+	pid, ok := m.pendingPermission(id)
+	if !ok {
+		return nil
+	}
+	runID := m.selectedID
+	m.status = fmt.Sprintf("%s permission %s/%s", label, runID, id)
+	return actionCmd(m, label, func(ctx context.Context) error {
+		return m.api.RespondPermission(ctx, runID, id, pid, allow)
 	})
 }
 
