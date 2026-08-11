@@ -144,7 +144,7 @@ func TestAutoApproveGatesSkipsOperator(t *testing.T) {
 		agent("w"),
 		{ID: "gate", Type: graph.NodeHuman, Objective: "approve", Priority: graph.PriorityNormal, DependsOn: []graph.NodeID{"w"}},
 	}}
-	h, err := s.CreateWithOptions(context.Background(), "run-autoapprove", g, sched.RunOptions{AutoApproveGates: true})
+	h, err := s.Create(context.Background(), "run-autoapprove", g, sched.CreateOptions{AutoApproveGates: true})
 	if err != nil {
 		t.Fatal(err)
 	}

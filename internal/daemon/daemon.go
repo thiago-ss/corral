@@ -382,6 +382,14 @@ func (d *Daemon) watchSnapshot(ctx context.Context, id string, since int64) (map
 		}
 		done = ru.Status != "active"
 	}
+	// The run status above was read before done was resolved; the store is
+	// finalized before the handle reports done, so re-read it so the
+	// snapshot never carries done=true with a stale status.
+	if done && ru.Status == "active" {
+		if ru2, err := d.st.Run(ctx, id); err == nil {
+			ru.Status = ru2.Status
+		}
+	}
 
 	var gates []string
 	for _, n := range ru.Graph.Nodes {

@@ -1,11 +1,9 @@
 package daemon_test
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -332,10 +330,10 @@ func TestAutoApproveGatesThroughAPI(t *testing.T) {
 	}
 }
 
-// TestWatchStreamsEvents drives the run through the SSE watch stream: it
-// must report the gate awaiting approval, and a done frame once the run
-// completes after the operator approves.
-func TestWatchStreamsEvents(t *testing.T) {
+// TestWatchReportsGateAndDone drives the run through the watch endpoint
+// (long-poll JSON): it must report the gate awaiting approval, and a done
+// snapshot once the run completes after the operator approves.
+func TestWatchReportsGateAndDone(t *testing.T) {
 	a, _, _, drv := setupDaemon(t, "")
 	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
 	g := &graph.Graph{Nodes: []*graph.Node{
@@ -349,47 +347,36 @@ func TestWatchStreamsEvents(t *testing.T) {
 	var created struct{ RunID string }
 	json.Unmarshal([]byte(body), &created)
 
-	resp, err := http.Get(a.base + "/api/runs/" + created.RunID + "/watch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Fatalf("content-type = %q, want text/event-stream", ct)
-	}
-	r := bufio.NewReader(resp.Body)
-
-	// The worker runs and the gate parks awaiting approval — the stream
-	// must flag it.
-	f, err := sseUntil(r, 30*time.Second, func(m map[string]any) bool {
-		g, _ := m["gate"].(bool)
-		aa, _ := m["awaitingApproval"].(bool)
-		return g && aa
+	// The worker runs and the gate parks awaiting approval — the watch
+	// snapshot must flag it.
+	snap := a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		gates, _ := m["gatesAwaitingApproval"].([]any)
+		return len(gates) == 1 && gates[0] == "gate"
 	})
-	if err != nil {
-		t.Fatalf("gate frame: %v", err)
+	if st, _ := snap["states"].(map[string]any)["gate"].(string); st != string(graph.StateRunning) {
+		t.Fatalf("gate state = %v, want running", st)
 	}
-	if f["nodeID"] != "gate" || f["to"] != "running" {
-		t.Fatalf("gate frame = %v, want nodeID gate to running", f)
+	if aa, _ := snap["autoApproveGates"].(bool); aa {
+		t.Fatal("autoApproveGates set on a default run")
 	}
 
-	// Approve via the API; the run completes and the stream emits done.
+	// Approve via the API; the run completes and the watch reports done.
 	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/approve", map[string]any{"nodeID": "gate"})
 	if code != http.StatusOK {
 		t.Fatalf("approve: %d %s", code, body)
 	}
-	f, err = sseUntil(r, 30*time.Second, func(m map[string]any) bool { return m["type"] == "done" })
-	if err != nil {
-		t.Fatalf("done frame: %v", err)
-	}
-	if f["status"] != "completed" {
-		t.Fatalf("done status = %v, want completed", f["status"])
+	snap = a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		d, _ := m["done"].(bool)
+		return d
+	})
+	if s, _ := snap["status"].(string); s != "completed" {
+		t.Fatalf("done status = %v, want completed", snap["status"])
 	}
 }
 
 // TestWatchReportsDoneForSettledRun opens the watch stream after a run
-// already settled: with no pending events the endpoint emits an immediate
-// done frame (and the `after` cursor is honored).
+// already settled: with no events after the cursor the endpoint still
+// reports the done snapshot immediately.
 func TestWatchReportsDoneForSettledRun(t *testing.T) {
 	a, _, _, drv := setupDaemon(t, "")
 	drv.SetScript("w1", sched.Script{Delay: 50 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
@@ -402,70 +389,37 @@ func TestWatchReportsDoneForSettledRun(t *testing.T) {
 	json.Unmarshal([]byte(body), &created)
 	a.waitState(t, "", created.RunID, "w1", graph.StateDone, 30*time.Second)
 
-	resp, err := http.Get(a.base + "/api/runs/" + created.RunID + "/watch?after=999999")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	r := bufio.NewReader(resp.Body)
-	f, err := sseUntil(r, 10*time.Second, func(m map[string]any) bool { return m["type"] == "done" })
-	if err != nil {
-		t.Fatalf("done frame: %v", err)
-	}
-	if f["status"] != "completed" {
-		t.Fatalf("done status = %v, want completed", f["status"])
+	snap := a.watchUntil(t, created.RunID, "999999", func(m map[string]any) bool {
+		d, _ := m["done"].(bool)
+		return d
+	})
+	if s, _ := snap["status"].(string); s != "completed" {
+		t.Fatalf("done status = %v, want completed", snap["status"])
 	}
 }
 
-// sseFrame reads one SSE data frame (data lines up to the blank line)
-// and parses it as JSON.
-func sseFrame(r *bufio.Reader, timeout time.Duration) (map[string]any, error) {
-	type res struct {
-		m   map[string]any
-		err error
-	}
-	ch := make(chan res, 1)
-	go func() {
-		var data []string
-		for {
-			line, err := r.ReadString('\n')
-			if err != nil {
-				ch <- res{err: err}
-				return
-			}
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" && len(data) > 0 {
-				var m map[string]any
-				if err := json.Unmarshal([]byte(strings.Join(data, "")), &m); err != nil {
-					ch <- res{err: fmt.Errorf("sse decode: %w", err)}
-					return
-				}
-				ch <- res{m: m}
-				return
-			}
-			if strings.HasPrefix(trimmed, "data:") {
-				data = append(data, strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
-			}
-		}
-	}()
-	select {
-	case r := <-ch:
-		return r.m, r.err
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timed out waiting for SSE frame")
-	}
-}
-
-// sseUntil consumes SSE frames until one satisfies pred.
-func sseUntil(r *bufio.Reader, timeout time.Duration, pred func(map[string]any) bool) (map[string]any, error) {
-	deadline := time.Now().Add(timeout)
+// watchUntil long-polls /watch until a snapshot satisfies pred.
+func (a *api) watchUntil(t *testing.T, runID, since string, pred func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
 	for {
-		frame, err := sseFrame(r, time.Until(deadline))
-		if err != nil {
-			return nil, err
+		q := "timeout=1"
+		if since != "" {
+			q += "&since=" + since
 		}
-		if pred(frame) {
-			return frame, nil
+		code, body := a.do("operator", http.MethodGet, "/api/runs/"+runID+"/watch?"+q, nil)
+		if code != http.StatusOK {
+			t.Fatalf("watch: %d %s", code, body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(body), &m); err != nil {
+			t.Fatalf("watch decode: %v", err)
+		}
+		if pred(m) {
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watch timed out waiting for snapshot: %s", body)
 		}
 	}
 }

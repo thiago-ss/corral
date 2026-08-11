@@ -131,6 +131,8 @@ type RunHandle struct {
 	done      bool
 	stepCount int64
 	started   time.Time
+
+	autoApproveGates bool
 }
 
 // CreateOptions carries per-run creation policies (extended without
@@ -156,7 +158,7 @@ func (s *Scheduler) Create(ctx context.Context, runID string, g *graph.Graph, op
 	if err := s.store.CreateRun(ctx, runID, g, o.AutoApproveGates, now); err != nil {
 		return nil, err
 	}
-	return s.newHandle(ctx, runID, g, now)
+	return s.newHandle(ctx, runID, g, now, o.AutoApproveGates)
 }
 
 // Load resumes a persisted run: events are replayed into a fresh tracker
@@ -237,6 +239,8 @@ func (s *Scheduler) Load(ctx context.Context, runID string) (*RunHandle, error) 
 		results:   make(chan Result, resultsBuffer),
 		holder:    fmt.Sprintf("corral-%d", now.UnixNano()),
 		started:   now,
+
+		autoApproveGates: r.AutoApproveGates,
 	}
 	for _, ev := range events {
 		if ev.Type == store.EventRetry {
@@ -267,7 +271,7 @@ func retryReadyAt(events []store.Event, nodeID graph.NodeID) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (s *Scheduler) newHandle(ctx context.Context, runID string, g *graph.Graph, now time.Time) (*RunHandle, error) {
+func (s *Scheduler) newHandle(ctx context.Context, runID string, g *graph.Graph, now time.Time, autoApproveGates bool) (*RunHandle, error) {
 	tr, err := graph.NewTracker(g)
 	if err != nil {
 		return nil, err
@@ -285,6 +289,8 @@ func (s *Scheduler) newHandle(ctx context.Context, runID string, g *graph.Graph,
 		results:   make(chan Result, resultsBuffer),
 		holder:    fmt.Sprintf("corral-%d", now.UnixNano()),
 		started:   now,
+
+		autoApproveGates: autoApproveGates,
 	}, nil
 }
 
@@ -802,7 +808,8 @@ func (h *RunHandle) startMerge(ctx context.Context, n *graph.Node, attemptID str
 }
 
 // startGate parks a human gate node in running until an operator approves
-// or rejects it. No driver session is involved.
+// or rejects it. No driver session is involved. When the run was created
+// with autoApproveGates the gate is approved immediately instead.
 func (h *RunHandle) startGate(ctx context.Context, n *graph.Node, attemptID string, no int, now time.Time) error {
 	sess := &gateSession{id: "gate:" + string(n.ID)}
 	started := now.UnixMilli()
@@ -821,8 +828,27 @@ func (h *RunHandle) startGate(ctx context.Context, n *graph.Node, attemptID stri
 	}); err != nil {
 		return err
 	}
-	return h.emitEvent(ctx, store.EventAttempt, n.ID, graph.State(""), graph.State(""), attemptID,
-		`{"phase":"start","sessionID":"`+sess.ID()+`"}`)
+	if err := h.emitEvent(ctx, store.EventAttempt, n.ID, graph.State(""), graph.State(""), attemptID,
+		`{"phase":"start","sessionID":"`+sess.ID()+`"}`); err != nil {
+		return err
+	}
+	if !h.autoApproveGates {
+		return nil
+	}
+	// Auto-approve: no operator round-trip; the gate passes through the
+	// evidence machine (running → verifying → done) like a manual approve.
+	delete(h.sessions, n.ID)
+	finished := now.UnixMilli()
+	if err := h.transit(ctx, n.ID, graph.StateRunning, graph.StateVerifying, ""); err != nil {
+		return err
+	}
+	if err := h.transit(ctx, n.ID, graph.StateVerifying, graph.StateDone, ""); err != nil {
+		return err
+	}
+	return h.s.store.RecordAttempt(ctx, store.Attempt{
+		ID: attemptID, RunID: h.runID, NodeID: string(n.ID), No: no,
+		Status: "done", SessionID: sess.ID(), StartedAt: &started, FinishedAt: &finished,
+	})
 }
 
 // completeInline registers the session, transitions to running, records

@@ -161,7 +161,7 @@ func TestMigrateAddsAutoApproveColumn(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	ctx := context.Background()
-	if err := st.CreateRun(ctx, "r1", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	ru, err := st.Run(ctx, "r1")
@@ -177,11 +177,11 @@ func TestAutoApproveGatesPersisted(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
 	// Default run: flag off.
-	if err := st.CreateRun(ctx, "off", testGraph(t), now()); err != nil {
+	if err := st.CreateRun(ctx, "off", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
 	// Explicit run: flag on.
-	if err := st.CreateRunWithOpts(ctx, "on", testGraph(t), true, now()); err != nil {
+	if err := st.CreateRun(ctx, "on", testGraph(t), true, now()); err != nil {
 		t.Fatal(err)
 	}
 	off, err := st.Run(ctx, "off")
