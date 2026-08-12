@@ -299,10 +299,10 @@ func (f *fakePlanner) Plan(_ context.Context, _ string) (*graph.Graph, error) { 
 
 var _ = daemon.RoleOperator
 
-// TestAutoApproveGatesThroughAPI creates a run with autoApproveGates and
-// verifies the flag is stored, exposed by GET /api/runs/{id}, and that the
-// gate completes without any operator approval.
-func TestAutoApproveGatesThroughAPI(t *testing.T) {
+// TestPreAuthorizedGateThroughAPI verifies that autoApproveGates is stored
+// and exposed as authorization metadata while the gate still waits for an
+// explicit orchestrator/operator API action.
+func TestPreAuthorizedGateThroughAPI(t *testing.T) {
 	a, _, _, drv := setupDaemon(t, "")
 	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
 	g := &graph.Graph{Nodes: []*graph.Node{
@@ -321,12 +321,27 @@ func TestAutoApproveGatesThroughAPI(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `"autoApproveGates":true`) {
 		t.Fatalf("autoApproveGates not exposed: %d %s", code, body)
 	}
-	// No operator approval needed: the gate completes on its own and the
-	// run settles without any approve call.
+	// The flag authorizes the orchestrator to act; scheduler still exposes
+	// the gate instead of silently bypassing it.
+	a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 30*time.Second)
+	snap := a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		gates, _ := m["gatesAwaitingApproval"].([]any)
+		return len(gates) == 1 && gates[0] == "gate"
+	})
+	if aa, _ := snap["autoApproveGates"].(bool); !aa {
+		t.Fatal("watch snapshot lost pre-authorization flag")
+	}
+	code, body = a.do("orchestrator", http.MethodPost, "/api/runs/"+created.RunID+"/approve", map[string]any{"nodeID": "gate"})
+	if code != http.StatusOK {
+		t.Fatalf("orchestrator approve: %d %s", code, body)
+	}
 	a.waitState(t, "", created.RunID, "gate", graph.StateDone, 30*time.Second)
-	code, body = a.do("operator", http.MethodGet, "/api/runs/"+created.RunID, nil)
-	if code != http.StatusOK || !strings.Contains(body, `"done":true`) {
-		t.Fatalf("run not done: %d %s", code, body)
+	snap = a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		done, _ := m["done"].(bool)
+		return done
+	})
+	if snap["status"] != "completed" {
+		t.Fatalf("run status = %v, want completed", snap["status"])
 	}
 }
 

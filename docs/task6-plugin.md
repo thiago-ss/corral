@@ -15,8 +15,8 @@ flow is verified end-to-end against a real OpenCode server.
   - `POST /api/runs` — start a run from a graph; run loops live on the
     daemon context (not request context — bug found and fixed) and
     persist via SQLite. Accepts `autoApproveGates` (stored on the run and
-    exposed by `GET /api/runs/{id}`); gates then pass without operator
-    approval.
+    exposed by `GET /api/runs/{id}`); gates remain explicit, and the flag
+    authorizes the orchestrator to call the normal approval endpoint.
   - `GET /api/runs`, `GET /api/runs/{id}` — follow execution (states,
     attempts, event log).
   - `GET /api/runs/{id}/watch` — Server-Sent Events stream of run deltas

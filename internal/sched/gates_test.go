@@ -134,7 +134,7 @@ func TestTokenBudgetBoundsRetries(t *testing.T) {
 	}
 }
 
-func TestAutoApproveGatesSkipsOperator(t *testing.T) {
+func TestPreAuthorizedGateStillRequiresApprovalAction(t *testing.T) {
 	st := newStore(t)
 	clk := fakeClock()
 	drv := sched.NewFakeDriver(clk, scriptsFor("w"))
@@ -149,16 +149,18 @@ func TestAutoApproveGatesSkipsOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(t, h, clk, 100)
+	if h.Done() {
+		t.Fatal("pre-authorized run bypassed its human gate")
+	}
+	if st2, _ := h.State("gate"); st2 != graph.StateRunning {
+		t.Fatalf("gate state = %s, want running until orchestrator approval", st2)
+	}
+	if err := h.ApproveNode(context.Background(), "gate"); err != nil {
+		t.Fatal(err)
+	}
+	drive(t, h, clk, 100)
 	if !h.Done() {
-		t.Fatal("auto-approve run did not settle")
-	}
-	// The gate must have passed without an operator action.
-	if st2, _ := h.State("gate"); st2 != graph.StateDone {
-		t.Fatalf("gate state = %s, want done (auto-approved)", st2)
-	}
-	atts, _ := st.Attempts(context.Background(), "run-autoapprove", "gate")
-	if len(atts) != 1 || atts[0].Status != "done" {
-		t.Fatalf("gate attempts = %+v, want a single done attempt", atts)
+		t.Fatal("pre-authorized run did not settle after approval action")
 	}
 	r, err := st.Run(context.Background(), "run-autoapprove")
 	if err != nil {
