@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -38,7 +39,9 @@ type GraphNode struct {
 		MaxRetries int `json:"maxRetries"`
 	} `json:"retryPolicy"`
 	Budget struct {
-		MaxDuration int64 `json:"maxDuration"` // nanoseconds (time.Duration)
+		MaxDuration int64   `json:"maxDuration"` // nanoseconds (time.Duration)
+		MaxTokens   int     `json:"maxTokens,omitempty"`
+		MaxCost     float64 `json:"maxCost,omitempty"`
 	} `json:"budget"`
 }
 
@@ -82,6 +85,7 @@ type RunDetail struct {
 type API interface {
 	ListRuns(ctx context.Context) ([]RunSummary, error)
 	GetRun(ctx context.Context, runID string) (*RunDetail, error)
+	Tail(ctx context.Context, runID, nodeID string, lines int) ([]string, error)
 	Approve(ctx context.Context, runID, nodeID string) error
 	Reject(ctx context.Context, runID, nodeID string) error
 	Cancel(ctx context.Context, runID, nodeID string) error
@@ -150,6 +154,15 @@ func (c *Client) GetRun(ctx context.Context, runID string) (*RunDetail, error) {
 	var out RunDetail
 	err := c.do(ctx, http.MethodGet, "/api/runs/"+runID, nil, &out)
 	return &out, err
+}
+
+func (c *Client) Tail(ctx context.Context, runID, nodeID string, lines int) ([]string, error) {
+	var out struct {
+		Lines []string `json:"lines"`
+	}
+	path := fmt.Sprintf("/api/runs/%s/tail?node=%s&lines=%d", runID, url.QueryEscape(nodeID), lines)
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out.Lines, err
 }
 
 func (c *Client) nodeAction(ctx context.Context, path, runID, nodeID string) error {

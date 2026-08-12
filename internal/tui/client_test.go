@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"corral/internal/adapter"
 	"corral/internal/clock"
 	"corral/internal/daemon"
 	"corral/internal/graph"
@@ -235,4 +236,73 @@ func TestClientRespondPermission(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("node never done after permission allowed")
+}
+
+// TestTailAgainstDaemon exercises the tail endpoint against a live daemon
+// with a running attempt: the transcript lines stream while the node runs.
+func TestTailAgainstDaemon(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	workdir := t.TempDir()
+	drv := sched.NewFakeDriver(clock.Real{}, nil)
+	eng := verify.New(workdir)
+	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{Concurrency: 2})
+	d := daemon.New(st, s, nil, t.TempDir(), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.SetContext(ctx)
+	srv := httptest.NewServer(d.Handler())
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL, "")
+	client.Role = "operator"
+	drv.SetScript("w1", sched.Script{
+		Delay: 5 * time.Second,
+		Messages: []adapter.Message{
+			{Role: "assistant", Text: "inspecting the workspace"},
+			{Role: "assistant", Text: "found the bug\napplying the fix"},
+		},
+	})
+	g := &graph.Graph{Nodes: []*graph.Node{{
+		ID: "w1", Type: graph.NodeAgent, Role: "worker",
+		Objective: "write a.txt", AcceptanceCriteria: []string{"a.txt"},
+		Priority: graph.PriorityNormal, WriteScope: []string{"a.txt"},
+		Verification: &graph.Verification{Kind: "command", Command: []string{"test", "-f", "a.txt"}},
+		Meta:         map[string]string{"cwd": workdir},
+	}}}
+	var created struct{ RunID string }
+	if err := client.do(ctx, "POST", "/api/runs", map[string]any{"graph": g}, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the node is running, then fetch the tail.
+	deadline := time.Now().Add(10 * time.Second)
+	var dd *RunDetail
+	for time.Now().Before(deadline) {
+		dd, _ = client.GetRun(ctx, created.RunID)
+		if dd != nil && dd.States["w1"] == "running" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if dd == nil || dd.States["w1"] != "running" {
+		t.Fatal("node never reached running")
+	}
+	lines, err := client.Tail(ctx, created.RunID, "w1", 40)
+	if err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("tail returned no lines while running")
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"inspecting", "applying"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("tail missing %q: %q", want, joined)
+		}
+	}
 }

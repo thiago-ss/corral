@@ -17,6 +17,8 @@ type fakeAPI struct {
 	actions   []string
 	listErr   error
 	detailErr error
+	tailErr   error
+	tail      []string
 }
 
 func (f *fakeAPI) ListRuns(ctx context.Context) ([]RunSummary, error) {
@@ -31,6 +33,13 @@ func (f *fakeAPI) GetRun(ctx context.Context, runID string) (*RunDetail, error) 
 		return nil, f.detailErr
 	}
 	return f.detail, nil
+}
+
+func (f *fakeAPI) Tail(ctx context.Context, runID, nodeID string, lines int) ([]string, error) {
+	if f.tailErr != nil {
+		return nil, f.tailErr
+	}
+	return f.tail, nil
 }
 
 func (f *fakeAPI) act(label string) {
@@ -228,6 +237,91 @@ func TestEmptyState(t *testing.T) {
 		t.Fatalf("empty view wrong:\n%s", m.View())
 	}
 }
+
+func TestLiveAttemptTail(t *testing.T) {
+	api := &fakeAPI{detail: sampleDetail(), tail: []string{"alpha", "beta", "gamma"}}
+	m := New(api, context.Background())
+	m.selectedID = "run_1"
+	m.detail = sampleDetail()
+	m.mode = modeDetail
+	m.nodeCursor = 1 // gate
+	m.Update(key("i"))
+	if m.mode != modeInspect || m.tailNode != "gate" {
+		t.Fatalf("inspect mode = %d tailNode=%q", m.mode, m.tailNode)
+	}
+	// Simulate the tail fetch result.
+	m.Update(tailMsg{node: "gate", lines: api.tail})
+	view := m.View()
+	for _, want := range []string{"live tail", "alpha", "beta", "gamma"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("inspect view missing %q:\n%s", want, view)
+		}
+	}
+	// Back clears the tail so it stops being fetched.
+	m.Update(key("esc"))
+	if m.tailNode != "" || len(m.tail) != 0 {
+		t.Fatalf("tail not cleared on back: node=%q tail=%v", m.tailNode, m.tail)
+	}
+}
+
+func TestAttentionOnGateAndFailure(t *testing.T) {
+	var got []string
+	api := &fakeAPI{detail: sampleDetail()}
+	m := New(api, context.Background())
+	m.notify = func(title, body string) { got = append(got, title+" | "+body) }
+	m.selectedID = "run_1"
+	m.detail = sampleDetail()
+
+	// First fetch: gate is running → gate attention fires.
+	m.Update(fetchRunMsg{detail: m.detail})
+	if len(got) != 1 || !strings.Contains(got[0], "gate") {
+		t.Fatalf("gate attention not fired: %v", got)
+	}
+
+	// Same state again: no duplicate.
+	m.Update(fetchRunMsg{detail: m.detail})
+	if len(got) != 1 {
+		t.Fatalf("duplicate attention fired: %v", got)
+	}
+
+	// A node fails → failure attention fires.
+	detail := sampleDetail()
+	detail.States["w1"] = "failed"
+	m.Update(fetchRunMsg{detail: detail})
+	if len(got) != 2 || !strings.Contains(got[1], "failed") {
+		t.Fatalf("failure attention not fired: %v", got)
+	}
+}
+
+func TestAttentionDisabledByDefault(t *testing.T) {
+	api := &fakeAPI{detail: sampleDetail()}
+	m := New(api, context.Background())
+	m.selectedID = "run_1"
+	m.detail = sampleDetail()
+	m.Update(fetchRunMsg{detail: m.detail})
+	if m.notified["run_1/gate/gate"] {
+		t.Fatal("attention should be disabled unless EnableAttention is called")
+	}
+}
+
+func TestBudgetBarInDetail(t *testing.T) {
+	d := sampleDetail()
+	d.Graph.Nodes[0].Budget.MaxDuration = int64(2 * time.Second)
+	d.Attempts["w1"] = []AttemptView{{ID: "w1/1", No: 1, Status: "done", StartedAt: int64Ptr(1000), FinishedAt: int64Ptr(2000)}}
+	m := New(&fakeAPI{detail: d}, context.Background())
+	m.selectedID = "run_1"
+	m.detail = d
+	m.mode = modeDetail
+	view := m.View()
+	if !strings.Contains(view, "progress") {
+		t.Fatalf("detail view missing progress bar:\n%s", view)
+	}
+	if !strings.Contains(view, "1s/2s") {
+		t.Fatalf("detail view missing budget usage:\n%s", view)
+	}
+}
+
+func int64Ptr(v int64) *int64 { return &v }
 
 func TestFetchErrorShown(t *testing.T) {
 	api := &fakeAPI{listErr: fmt.Errorf("connection refused")}

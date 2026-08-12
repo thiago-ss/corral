@@ -229,7 +229,9 @@ func tuiCmd() error {
 	client := tui.NewClient(base, key)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	p := tea.NewProgram(tui.New(client, ctx), tea.WithAltScreen())
+	model := tui.New(client, ctx)
+	model.EnableAttention()
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }

@@ -83,7 +83,7 @@ func TestOpenAPIContract(t *testing.T) {
 	paths, _ := doc["paths"].(map[string]any)
 	registered := []string{
 		"/api/health", "/api/plan", "/api/runs", "/api/runs/{id}",
-		"/api/runs/{id}/watch", "/api/runs/{id}/events",
+		"/api/runs/{id}/watch", "/api/runs/{id}/events", "/api/runs/{id}/tail",
 		"/api/runs/{id}/approve", "/api/runs/{id}/reject", "/api/runs/{id}/cancel",
 		"/api/runs/{id}/retry", "/api/runs/{id}/steer", "/api/runs/{id}/permission",
 		"/api/runs/{id}/export", "/doc",

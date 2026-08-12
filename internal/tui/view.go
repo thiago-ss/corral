@@ -19,6 +19,27 @@ var (
 	styleMuted    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
 
+// progressBar renders a horizontal bar of the given width with the filled
+// fraction (0..1). Empty fill uses a bright color, so near-full usage is
+// easy to spot.
+func progressBar(frac float64, width int) string {
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	filled := int(frac*float64(width) + 0.5)
+	body := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	if frac >= 1 {
+		return styleError.Render(body)
+	}
+	if frac >= 0.85 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(body)
+	}
+	return styleOK.Render(body)
+}
+
 func stateColor(s string) lipgloss.Style {
 	switch s {
 	case "done":
@@ -82,6 +103,18 @@ func (m *Model) viewDetail() string {
 	if m.detail.Done {
 		b.WriteString(styleOK.Render(" ✓ done"))
 	}
+	// Overall run progress: done nodes / total.
+	total := len(m.detail.Graph.Nodes)
+	if total > 0 {
+		done := 0
+		for _, n := range m.detail.Graph.Nodes {
+			if m.detail.States[n.ID] == "done" {
+				done++
+			}
+		}
+		b.WriteString("\n" + styleDim.Render("progress ") + progressBar(float64(done)/float64(total), 20) +
+			styleMuted.Render(fmt.Sprintf(" %d/%d done", done, total)))
+	}
 	b.WriteString("\n\n")
 
 	// DAG view: nodes in dependency order, arrows between them.
@@ -132,7 +165,70 @@ func (m *Model) nodeLine(n GraphNode, deps int) string {
 			permS = styleTitle.Render(fmt.Sprintf("perm:%s", pid))
 		}
 	}
-	return fmt.Sprintf("%-12s %s %-7s %s %s %s %s", n.ID, st, typ, prio, attempts, depsS, permS)
+	bar := m.nodeBudgetBar(n, atts, state)
+	return fmt.Sprintf("%-12s %s %-7s %s %s %s %s %s", n.ID, st, typ, prio, attempts, depsS, bar, permS)
+}
+
+// nodeBudgetBar renders a compact budget-usage bar for a node. The
+// dominant budget dimension (time, tokens, or cost) drives the bar, with
+// the used/limit figures beside it. Nodes without a budget show "".
+func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, state string) string {
+	maxDur := n.Budget.MaxDuration
+	maxTok := n.Budget.MaxTokens
+	maxCost := n.Budget.MaxCost
+	if maxDur <= 0 && maxTok <= 0 && maxCost <= 0 {
+		return ""
+	}
+	// Used figures, from the most recent attempt for time and the sum for
+	// tokens/cost.
+	var usedDur time.Duration
+	usedTok := 0
+	usedCost := 0.0
+	if len(atts) > 0 {
+		at := atts[len(atts)-1]
+		start := m.now()
+		if at.StartedAt != nil {
+			start = time.UnixMilli(*at.StartedAt)
+		}
+		end := m.now()
+		if at.FinishedAt != nil {
+			end = time.UnixMilli(*at.FinishedAt)
+		}
+		if end.After(start) {
+			usedDur = end.Sub(start)
+		}
+	}
+	for _, at := range atts {
+		usedTok += at.Tokens
+		usedCost += at.Cost
+	}
+	// Choose the dominant dimension.
+	var frac float64
+	var label string
+	switch {
+	case maxDur > 0:
+		frac = float64(usedDur) / float64(time.Duration(maxDur))
+		label = fmt.Sprintf("%s/%s", usedDur.Round(time.Second), time.Duration(maxDur).Round(time.Second))
+	case maxTok > 0:
+		frac = float64(usedTok) / float64(maxTok)
+		label = fmt.Sprintf("%dk/%dk", usedTok/1000, maxTok/1000)
+	default:
+		frac = usedCost / maxCost
+		label = fmt.Sprintf("$%.2f/%.2f", usedCost, maxCost)
+	}
+	if state == "done" {
+		frac = 1
+	}
+	return progressBar(frac, 8) + " " + styleMuted.Render(label)
+}
+
+// now returns the model's wall-clock reference (last tick time, or real
+// time before the first tick) for elapsed computations.
+func (m *Model) now() time.Time {
+	if m.lastFetch.IsZero() {
+		return time.Now()
+	}
+	return m.lastFetch
 }
 
 func (m *Model) viewInspect() string {
@@ -177,6 +273,17 @@ func (m *Model) viewInspect() string {
 		}
 		if at.Evidence != "" {
 			b.WriteString(styleMuted.Render("     evidence: "+shortLine(at.Evidence, 90)) + "\n")
+		}
+	}
+	// Live attempt tail for the current (running) attempt.
+	if state == "running" || state == "verifying" {
+		b.WriteString("\n" + styleDim.Render("live tail") + "\n")
+		if len(m.tail) == 0 {
+			b.WriteString(styleMuted.Render("  (no output yet)\n"))
+		} else {
+			for _, ln := range m.tail {
+				b.WriteString(styleMuted.Render("  "+shortLine(ln, 90)) + "\n")
+			}
 		}
 	}
 	b.WriteString("\n" + m.footer("esc back · ↑/↓ navigate · a/r/c/t/s act · p/d respond perm"))

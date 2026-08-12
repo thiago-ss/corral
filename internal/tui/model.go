@@ -25,6 +25,12 @@ type fetchRunMsg struct {
 	err    error
 }
 
+type tailMsg struct {
+	node  string
+	lines []string
+	err   error
+}
+
 type actionMsg struct {
 	label string
 	err   error
@@ -57,6 +63,20 @@ type Model struct {
 	steerNode  string
 	steerInput string
 
+	// tail holds the last-fetched live attempt tail for the inspected
+	// node. tailNode is set when the inspect view is active.
+	tailNode string
+	tail     []string
+
+	// prevStates records the last seen node states so attention only
+	// fires on transitions (gate awaiting approval, node failed).
+	prevStates map[string]string
+	// notified remembers which attention conditions have already been
+	// announced, keyed by runID/nodeID/condition.
+	notified map[string]bool
+	// notify delivers terminal attention; overridden in tests.
+	notify func(title, body string)
+
 	status string
 	err    error
 
@@ -67,6 +87,12 @@ type Model struct {
 func New(api API, ctx context.Context) *Model {
 	return &Model{api: api, ctx: ctx, tick: time.Second}
 }
+
+// EnableAttention arms terminal attention notifications (bell + desktop
+// notification) for gates awaiting approval and failed nodes. The model
+// ships with attention disabled so unit tests stay side-effect free; the
+// real TUI calls this once at startup.
+func (m *Model) EnableAttention() { m.notify = NotifyAttention }
 
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(fetchRunsCmd(m), tickCmd(m.tick))
@@ -83,6 +109,13 @@ func fetchRunCmd(m *Model) tea.Cmd {
 	return func() tea.Msg {
 		d, err := m.api.GetRun(m.ctx, m.selectedID)
 		return fetchRunMsg{detail: d, err: err}
+	}
+}
+
+func fetchTailCmd(m *Model) tea.Cmd {
+	return func() tea.Msg {
+		lines, err := m.api.Tail(m.ctx, m.selectedID, m.tailNode, 40)
+		return tailMsg{node: m.tailNode, lines: lines, err: err}
 	}
 }
 
@@ -108,7 +141,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeList:
 			return m, tea.Batch(cmd, fetchRunsCmd(m))
 		case modeDetail, modeInspect:
-			return m, tea.Batch(cmd, fetchRunCmd(m))
+			cmds := []tea.Cmd{cmd, fetchRunCmd(m)}
+			if m.mode == modeInspect && m.tailNode != "" {
+				cmds = append(cmds, fetchTailCmd(m))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, cmd
 
@@ -135,6 +172,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.nodeCursor >= len(m.detail.Graph.Nodes) {
 				m.nodeCursor = 0
 			}
+			m.checkAttention()
+		}
+		return m, nil
+
+	case tailMsg:
+		if v.err == nil && v.node == m.tailNode {
+			m.tail = v.lines
 		}
 		return m, nil
 
@@ -205,6 +249,8 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "i":
 			if id, ok := m.nodeAt(m.nodeCursor); ok {
 				m.inspectNode = id
+				m.tailNode = id
+				m.tail = nil
 				m.mode = modeInspect
 				return m, nil
 			}
@@ -301,6 +347,8 @@ func (m *Model) back() {
 	switch m.mode {
 	case modeInspect:
 		m.mode = modeDetail
+		m.tailNode = ""
+		m.tail = nil
 	case modeSteer:
 		m.mode = modeDetail
 	case modeDetail:
@@ -356,3 +404,44 @@ func (m *Model) SelectedNode() (string, bool) { return m.nodeAt(m.nodeCursor) }
 
 // CurrentRun returns the selected run id (for tests).
 func (m *Model) CurrentRun() string { return m.selectedID }
+
+// checkAttention fires a terminal attention notification when a node's
+// state demands it: a human gate awaiting approval (running) or any node
+// that fails. Each condition is announced once per transition.
+func (m *Model) checkAttention() {
+	if m.detail == nil || m.notify == nil {
+		return
+	}
+	if m.prevStates == nil {
+		m.prevStates = map[string]string{}
+	}
+	if m.notified == nil {
+		m.notified = map[string]bool{}
+	}
+	for _, n := range m.detail.Graph.Nodes {
+		cur := m.detail.States[n.ID]
+		prev := m.prevStates[n.ID]
+		m.prevStates[n.ID] = cur
+		key := m.detail.RunID + "/" + n.ID
+
+		// Drop remembered conditions that no longer hold, so a later
+		// recurrence (retry, re-opened gate) announces again.
+		if cur != "running" {
+			delete(m.notified, key+"/gate")
+		}
+		if cur != "failed" {
+			delete(m.notified, key+"/failed")
+		}
+
+		if cur == "running" && prev != "running" && n.Type == "human_gate" && !m.notified[key+"/gate"] {
+			m.notified[key+"/gate"] = true
+			m.notify("corral: gate awaits approval",
+				fmt.Sprintf("gate %s on run %s awaits approval", n.ID, m.detail.RunID))
+		}
+		if cur == "failed" && prev != "failed" && !m.notified[key+"/failed"] {
+			m.notified[key+"/failed"] = true
+			m.notify("corral: node failed",
+				fmt.Sprintf("node %s on run %s failed", n.ID, m.detail.RunID))
+		}
+	}
+}

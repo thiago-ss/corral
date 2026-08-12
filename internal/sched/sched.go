@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -975,6 +976,41 @@ func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) 
 	payload, _ := json.Marshal(map[string]any{"message": message})
 	_, err := h.s.store.AppendEvent(ctx, h.runID, string(id), store.EventSteer, graph.State(""), graph.State(""), rec.attemptID, string(payload), h.s.clk.Now())
 	return err
+}
+
+// Tail returns the last n transcript lines of the in-flight attempt of a
+// node, for live output in the companion TUI. Empty when the node has no
+// live session (e.g. inline check/gate nodes).
+func (h *RunHandle) Tail(ctx context.Context, id graph.NodeID, n int) ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rec, ok := h.sessions[id]
+	if !ok {
+		return nil, fmt.Errorf("node %s has no in-flight attempt", id)
+	}
+	msgs, err := rec.sess.Messages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return transcriptLines(msgs, n), nil
+}
+
+// transcriptLines flattens a session transcript into text lines and keeps
+// only the last n of them (a "tail").
+func transcriptLines(msgs []adapter.Message, n int) []string {
+	var lines []string
+	for _, m := range msgs {
+		for _, ln := range strings.Split(m.Text, "\n") {
+			if ln == "" {
+				continue
+			}
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
 }
 
 func (h *RunHandle) decideGate(ctx context.Context, id graph.NodeID, approve bool) error {
