@@ -614,6 +614,9 @@ func (m *Model) applyEvent(event EventView) bool {
 		}
 		// Attempt finalization is durable before the terminal/waiting run
 		// event. Refresh once here so transcript metadata and usage settle.
+		if m.detail.Done {
+			m.stopEventStream()
+		}
 		return true
 	case "attempt", "verdict", "graph":
 		return true
