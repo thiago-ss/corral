@@ -28,6 +28,9 @@ const OpenAPI = `{
     "/api/runs/{id}/watch": {
       "get": {"parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "timeout", "in": "query", "schema": {"type": "integer"}}], "responses": {"200": {"description": "run snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WatchResponse"}}}}}}
     },
+    "/api/runs/{id}/tail": {
+      "get": {"parameters": [{"name": "node", "in": "query", "required": true, "schema": {"type": "string", "maxLength": 256}}, {"name": "lines", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 40}}], "responses": {"200": {"description": "live attempt tail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Tail"}}}}, "400": {"description": "invalid node or line count"}, "404": {"description": "run not found"}, "409": {"description": "node has no live attempt"}}}
+    },
     "/api/runs/{id}/approve": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/reject": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/cancel": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
@@ -112,6 +115,13 @@ const OpenAPI = `{
           "seq": {"type": "integer"}, "runID": {"type": "string"}, "nodeID": {"type": "string"},
           "type": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"},
           "attemptID": {"type": "string"}, "payload": {}, "createdAt": {"type": "integer"}
+        }
+      },
+      "Tail": {
+        "type": "object", "required": ["node", "lines"],
+        "properties": {
+          "node": {"type": "string"},
+          "lines": {"type": "array", "items": {"type": "string"}}
         }
       },
       "Artifact": {

@@ -139,6 +139,7 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs", d.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", d.handleGetRun)
 	mux.HandleFunc("GET /api/runs/{id}/watch", d.handleWatchRun)
+	mux.HandleFunc("GET /api/runs/{id}/tail", d.handleTail)
 	mux.HandleFunc("POST /api/runs/{id}/approve", d.role(RoleOperator, RoleOrchestrator)(d.handleApprove))
 	mux.HandleFunc("POST /api/runs/{id}/reject", d.role(RoleOperator, RoleOrchestrator)(d.handleReject))
 	mux.HandleFunc("POST /api/runs/{id}/cancel", d.role(RoleOperator, RoleOrchestrator)(d.handleCancel))
@@ -460,6 +461,37 @@ func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTail returns the live transcript tail of a node's in-flight
+// attempt (query params: node, lines). Used by the TUI's inspect view.
+func (d *Daemon) handleTail(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	node := q.Get("node")
+	if node == "" || len(node) > 256 {
+		http.Error(w, "node required", http.StatusBadRequest)
+		return
+	}
+	lines := 40
+	if v := q.Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			http.Error(w, "lines must be between 1 and 500", http.StatusBadRequest)
+			return
+		}
+		lines = n
+	}
+	h, err := d.runHandle(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	tail, err := h.Tail(r.Context(), graph.NodeID(node), lines)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": node, "lines": tail})
 }
 
 func (d *Daemon) handleApprove(w http.ResponseWriter, r *http.Request) {
