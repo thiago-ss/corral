@@ -406,6 +406,83 @@ func TestBudgetBarInDetail(t *testing.T) {
 	if !strings.Contains(view, "1s/2s") {
 		t.Fatalf("detail view missing budget usage:\n%s", view)
 	}
+	if !strings.Contains(view, "wall elapsed") {
+		t.Fatalf("detail view must label timestamp-only duration as wall elapsed:\n%s", view)
+	}
+}
+
+func TestBudgetBarExcludesPermissionWaitFromProviderRuntime(t *testing.T) {
+	d := sampleDetail()
+	n := &d.Graph.Nodes[0]
+	n.Budget.MaxDuration = int64(10 * time.Second)
+	d.Attempts["w1"] = []AttemptView{{
+		ID: "run_1/w1/1", No: 1, Status: "done",
+		StartedAt: int64Ptr(1_000), FinishedAt: int64Ptr(26_000),
+	}}
+	d.Events = []EventView{
+		{Seq: 1, NodeID: "w1", Type: "attempt", AttemptID: "run_1/w1/1", CreatedAt: 1_000},
+		{Seq: 2, NodeID: "w1", Type: "transition", From: "running", To: "blocked", CreatedAt: 3_000},
+		{Seq: 3, NodeID: "w1", Type: "transition", From: "blocked", To: "ready", CreatedAt: 23_000},
+		{Seq: 4, NodeID: "w1", Type: "transition", From: "ready", To: "leased", CreatedAt: 23_000},
+		{Seq: 5, NodeID: "w1", Type: "transition", From: "leased", To: "running", CreatedAt: 23_000},
+		{Seq: 6, NodeID: "w1", Type: "transition", From: "running", To: "verifying", CreatedAt: 26_000},
+	}
+	m := New(&fakeAPI{}, context.Background())
+	m.detail = d
+	bar := m.nodeBudgetBar(*n, d.Attempts["w1"], "done")
+	if !strings.Contains(bar, "runtime 5s/10s") {
+		t.Fatalf("permission wait counted as provider runtime: %q", bar)
+	}
+}
+
+func TestElapsedActiveAttemptUsesCurrentTime(t *testing.T) {
+	start := time.Now().Add(-2 * time.Second).UnixMilli()
+	got := elapsed(start, nil)
+	if got == "0ms" {
+		t.Fatal("active attempt elapsed time must advance")
+	}
+}
+
+func TestInspectSanitizesProviderTerminalControls(t *testing.T) {
+	d := sampleDetail()
+	d.States["w1"] = "running"
+	d.Graph.Nodes[0].Objective = "safe\x1b]52;c;Y2xpcGJvYXJk\a\x1b[31mred\x1b[0m"
+	d.Attempts["w1"][0].Status = "run\x1b]52;c;c3RhdHVz\a\x1b[31mning\x1b[0m"
+	d.Attempts["w1"][0].Evidence = "proof\x1b]0;title\a"
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.inspectNode, m.detail, m.mode = "run_1", "w1", d, modeInspect
+	m.tail = []string{"tail\x1b]52;c;ZXZpbA==\a\x1b[2Jvisible"}
+	view := m.View()
+	for _, unsafe := range []string{"\x1b]52", "\x1b[31m", "\x1b[2J", "\a"} {
+		if strings.Contains(view, unsafe) {
+			t.Fatalf("view retained terminal control %q: %q", unsafe, view)
+		}
+	}
+	for _, want := range []string{"safe", "red", "proof", "tail", "visible"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view lost safe text %q: %q", want, view)
+		}
+	}
+}
+
+func TestCursorTargetsRenderedGraphOrder(t *testing.T) {
+	d := sampleDetail()
+	// Input order differs from the stable ID order rendered by viewDetail.
+	d.Graph.Nodes = []GraphNode{d.Graph.Nodes[2], d.Graph.Nodes[0], d.Graph.Nodes[1]}
+	api := &fakeAPI{}
+	m := New(api, context.Background())
+	m.selectedID, m.detail, m.mode, m.nodeCursor = "run_1", d, modeDetail, 0
+	if selected, ok := m.SelectedNode(); !ok || selected != "m" {
+		t.Fatalf("selected node = %q, %v; want first rendered node m", selected, ok)
+	}
+	_, cmd := m.Update(key("a"))
+	if cmd == nil {
+		t.Fatal("approve command missing")
+	}
+	cmd()
+	if len(api.actions) != 1 || api.actions[0] != "approve:m" {
+		t.Fatalf("cursor action = %v, want approve:m", api.actions)
+	}
 }
 
 func TestBudgetBarUsesHighestUtilizationAndDoesNotFillDone(t *testing.T) {

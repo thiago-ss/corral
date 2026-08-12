@@ -15,7 +15,8 @@ is the companion observability surface (no OpenCode fork needed).
   terminal. Modes: list → detail → inspect → steer. Keys:
   - list: `↑/↓` (or j/k), `enter` detail, `q` quit
   - detail: `↑/↓` node, `a` approve, `r` reject, `c` cancel, `t` retry,
-    `s` steer (typed message, enter sends), `i` inspect, `esc` back
+    `p` allow permission, `d` deny permission, `s` steer (typed message,
+    enter sends), `i` inspect, `esc` back
   - inspect: attempts (status, session, worktree, elapsed, cost/tokens,
     evidence) plus the active attempt's live transcript tail, `esc` back
 - `internal/tui/view.go` — lipgloss rendering:

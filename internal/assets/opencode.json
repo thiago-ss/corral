@@ -39,20 +39,11 @@
       }
     },
     "corral-reviewer": {
-      "description": "Corral reviewer: read-only analysis plus tests and diffs.",
+      "description": "Corral reviewer: evaluates supplied evidence without tools.",
       "mode": "subagent",
-      "prompt": "You are a corral reviewer. Inspect the worker's output read-only; you may run tests and inspect diffs, but never modify files.",
+      "prompt": "You are a corral reviewer. Evaluate only the evidence supplied in the prompt. Never call tools or modify external state.",
       "permission": {
-        "edit": "deny",
-        "bash": {
-          "*": "deny",
-          "git diff*": "allow",
-          "git status*": "allow",
-          "git log*": "allow",
-          "go test*": "allow",
-          "npm test*": "allow",
-          "pytest*": "allow"
-        }
+        "*": "deny"
       }
     },
     "corral-merger": {

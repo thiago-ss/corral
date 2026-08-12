@@ -119,9 +119,10 @@ Corral currently wires four completion paths:
   reported by the driver. Prose alone fails.
 - **Reviewer:** a read-only OpenCode session reviews the attempt's evidence —
   objective, prior feedback, transcript, the recorded diff artifact, and check
-  results — and must conclude `APPROVED`; a `NOT_APPROVED` verdict returns its
-  note as focused retry feedback. Set `CORRAL_REVIEWER_MODEL` to use a specific
-  model for review sessions.
+  results — and must return exactly `APPROVED` or `CHANGES_REQUESTED`, followed
+  by a required `Note:` line. A change request returns its note as focused
+  retry feedback. Set `CORRAL_REVIEWER_MODEL` to a `provider/model` value to
+  use a specific model for review sessions.
 
 ## Proof, not promises
 

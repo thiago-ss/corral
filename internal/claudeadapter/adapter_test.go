@@ -40,14 +40,30 @@ func TestMain(m *testing.M) {
 // fakeProc simulates a claude process: it emits stream-json events written by
 // the test and records signals for abort assertions.
 type fakeProc struct {
-	r       *io.PipeReader
-	w       *io.PipeWriter
-	doneCh  chan struct{}
-	sigCh   chan os.Signal
-	spec    spawnSpec
-	mu      sync.Mutex
-	exited  bool
-	waitErr error
+	r        *io.PipeReader
+	w        *io.PipeWriter
+	doneCh   chan struct{}
+	sigCh    chan os.Signal
+	spec     spawnSpec
+	mu       sync.Mutex
+	exited   bool
+	waitErr  error
+	termErr  error
+	killErr  error
+	killExit bool
+	out      io.Reader
+}
+
+type trackingReadCloser struct {
+	io.ReadCloser
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (r *trackingReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(func() { close(r.closed) })
+	return err
 }
 
 // faultReader emits valid stream data, one synthetic read error, then more
@@ -130,7 +146,12 @@ func newFakeProc() (*fakeProc, *io.PipeReader) {
 	}, r
 }
 
-func (f *fakeProc) stdout() io.Reader { return f.r }
+func (f *fakeProc) stdout() io.Reader {
+	if f.out != nil {
+		return f.out
+	}
+	return f.r
+}
 func (f *fakeProc) done() <-chan struct{} {
 	return f.doneCh
 }
@@ -141,6 +162,15 @@ func (f *fakeProc) wait() error {
 }
 func (f *fakeProc) signal(sig os.Signal) error {
 	f.sigCh <- sig
+	if sig == syscall.SIGTERM && f.termErr != nil {
+		return f.termErr
+	}
+	if sig == os.Kill && f.killErr != nil {
+		return f.killErr
+	}
+	if sig == os.Kill && f.killExit {
+		f.finish(fmt.Errorf("killed"))
+	}
 	return nil
 }
 
@@ -181,7 +211,6 @@ func attemptFor(id, objective string) adapter.Attempt {
 		Objective:          objective,
 		Role:               "worker",
 		Model:              "claude-sonnet-5",
-		Cwd:                "/tmp/work",
 		WriteScope:         []string{"src"},
 		MaxDurationSeconds: 600,
 	}
@@ -242,6 +271,37 @@ func TestDriverImplementsAdapterInterfaces(t *testing.T) {
 	var _ adapter.PermissionSession = (*session)(nil)
 }
 
+func TestAllowedToolsIncludeRecursiveWriteScope(t *testing.T) {
+	got := allowedTools(adapter.Attempt{WriteScope: []string{"src", "README.md", "*"}})
+	want := []string{
+		"Read", "Glob", "Grep",
+		"Edit(src)", "Write(src)", "Edit(src/**)", "Write(src/**)",
+		"Edit(README.md)", "Write(README.md)", "Edit(README.md/**)", "Write(README.md/**)",
+		"Edit", "Write",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("allowed tools = %v, want %v", got, want)
+	}
+}
+
+func TestAllowedToolsEmptyScopeMeansWholeRepository(t *testing.T) {
+	got := allowedTools(adapter.Attempt{})
+	want := []string{"Read", "Glob", "Grep", "Edit", "Write"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("allowed tools = %v, want %v", got, want)
+	}
+}
+
+func TestAllowedToolsReviewerIsReadOnly(t *testing.T) {
+	for _, scope := range [][]string{nil, {"*"}, {"src"}} {
+		got := allowedTools(adapter.Attempt{Role: "reviewer", WriteScope: scope})
+		want := []string{"Read", "Glob", "Grep"}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("scope %v: allowed tools = %v, want %v", scope, got, want)
+		}
+	}
+}
+
 func TestSystemInitUsesClaudeStreamShapeAndRemapsSession(t *testing.T) {
 	fp, _ := newFakeProc()
 	drv := New(Options{DisablePermissions: true})
@@ -282,6 +342,7 @@ func TestStartCompletion(t *testing.T) {
 	defer drv.Close()
 
 	a := attemptFor("w1/1", "create src/alpha.txt")
+	a.Cwd = t.TempDir()
 	sess, err := drv.Start(context.Background(), a)
 	if err != nil {
 		t.Fatal(err)
@@ -389,14 +450,212 @@ func TestStartCompletion(t *testing.T) {
 	if !hasWrite {
 		t.Errorf("write scope not mapped to a Write rule: %v", fp.spec.args)
 	}
-	if fp.spec.dir != "/tmp/work" {
-		t.Errorf("cwd = %q, want /tmp/work", fp.spec.dir)
+	if fp.spec.dir != a.Cwd {
+		t.Errorf("cwd = %q, want %q", fp.spec.dir, a.Cwd)
 	}
 	if !strings.Contains(fp.spec.args[1], "(role: worker)") {
 		t.Errorf("prompt missing role header: %q", fp.spec.args[1])
 	}
 	if !strings.Contains(fp.spec.args[1], a.Objective) {
 		t.Errorf("prompt missing objective: %q", fp.spec.args[1])
+	}
+}
+
+func TestCompletionCapturesWorktreeDiffsForDefaultVerification(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "tracked.txt")
+	git("-c", "user.name=corral", "-c", "user.email=corral@local", "commit", "-qm", "init")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new file.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	a := attemptFor("w1/1", "edit files")
+	a.Cwd = repo
+	sess, err := drv.Start(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 {
+		t.Fatalf("completions = %d, want 1", len(cs))
+	}
+	var diffs []adapter.Diff
+	for _, msg := range cs[0].Messages {
+		if msg.Role == "user" {
+			diffs = append(diffs, msg.Diffs...)
+		}
+	}
+	if len(diffs) != 2 {
+		t.Fatalf("diffs = %+v, want tracked and untracked file", diffs)
+	}
+	byFile := make(map[string]adapter.Diff, len(diffs))
+	for _, diff := range diffs {
+		byFile[diff.File] = diff
+	}
+	tracked := byFile["tracked.txt"]
+	if tracked.Status != "modified" || tracked.Additions != 1 || tracked.Deletions != 1 ||
+		!strings.Contains(tracked.Patch, "+after") {
+		t.Errorf("tracked diff = %+v", tracked)
+	}
+	added := byFile["new file.txt"]
+	if added.Status != "added" || added.Additions != 1 || added.Deletions != 0 ||
+		!strings.Contains(added.Patch, "+new") {
+		t.Errorf("untracked diff = %+v", added)
+	}
+
+	verdict, err := verify.New(repo).Verify(context.Background(), &graph.Node{
+		ID: "w1", Type: graph.NodeAgent, Objective: "edit files",
+	}, repo, 1, cs[0].Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verdict.Pass {
+		t.Fatalf("default verification rejected real file changes: %+v", verdict)
+	}
+}
+
+func TestCaptureGitDiffsNonGitDirectoryIsBestEffort(t *testing.T) {
+	diffs, err := captureGitDiffs(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("non-Git directory returned error: %v", err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("non-Git directory diffs = %+v, want none", diffs)
+	}
+}
+
+func TestCaptureGitDiffsCancellationReturnsNoPartialEvidence(t *testing.T) {
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-q", "-b", "main")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	diffs, err := captureGitDiffs(ctx, repo)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("capture error = %v, want context canceled", err)
+	}
+	if len(diffs) != 0 {
+		t.Fatalf("canceled capture leaked partial diffs: %+v", diffs)
+	}
+}
+
+func TestCompletionFailsClosedWhenGitEvidenceCannotBeCaptured(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "tracked.txt")
+	git("-c", "user.name=corral", "-c", "user.email=corral@local", "commit", "-qm", "init")
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = repo
+	head, err := headCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "refs", "heads", "main"), []byte(strings.Repeat("0", len(strings.TrimSpace(string(head))))+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	a := attemptFor("w1/1", "edit files")
+	a.Cwd = repo
+	sess, err := drv.Start(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 {
+		t.Fatalf("completions = %d, want 1", len(cs))
+	}
+	if cs[0].Status != adapter.StatusError {
+		t.Fatalf("status = %q, want error", cs[0].Status)
+	}
+	if cs[0].Err == nil || !strings.Contains(cs[0].Err.Error(), "capture git diff evidence") {
+		t.Fatalf("completion error = %v, want evidence capture error", cs[0].Err)
+	}
+	for _, msg := range cs[0].Messages {
+		if len(msg.Diffs) != 0 {
+			t.Fatalf("failed capture leaked partial diffs: %+v", msg.Diffs)
+		}
+	}
+}
+
+func TestCompletedAttemptReleasesLiveRegistryAndRejectsReuse(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+
+	a := attemptFor("w1/1", "task")
+	sess, err := drv.Start(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := sess.ID()
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sid})
+	fp.finish(nil)
+	if got := drainSteps(drv, 1); len(got) != 1 {
+		t.Fatalf("completions = %d, want 1", len(got))
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for drv.attemptByID(a.ID) != nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if drv.attemptByID(a.ID) != nil || drv.attemptBySession(sid) != nil {
+		t.Fatal("completed attempt retained in live driver registry")
+	}
+	spawned := false
+	drv.spawn = func(context.Context, spawnSpec) (process, error) {
+		spawned = true
+		return nil, errors.New("unexpected spawn")
+	}
+	if _, err := drv.Start(context.Background(), a); err == nil || !strings.Contains(err.Error(), "already started") {
+		t.Fatalf("reused attempt error = %v", err)
+	}
+	if spawned {
+		t.Fatal("duplicate completed attempt spawned another process")
 	}
 }
 
@@ -461,6 +720,31 @@ func TestFloodedStreamPreservesEveryEventInOrder(t *testing.T) {
 	for i, msg := range cs[0].Messages {
 		if want := fmt.Sprintf("%04d", i); msg.Text != want {
 			t.Fatalf("message[%d] = %q, want %q", i, msg.Text, want)
+		}
+	}
+}
+
+func TestCompletionBurstIsNeverDropped(t *testing.T) {
+	drv := New(Options{DisablePermissions: true})
+	defer drv.Close()
+
+	const count = 128
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("attempt-%03d", i)
+		at := &attempt{
+			d: drv, attemptID: id, sessionID: "session-" + id,
+			terminal: true, exited: true, subtype: "success",
+		}
+		drv.maybeComplete(context.Background(), at)
+	}
+
+	got := drv.Step(context.Background(), time.Now())
+	if len(got) != count {
+		t.Fatalf("completion burst = %d, want %d", len(got), count)
+	}
+	for i, completion := range got {
+		if want := fmt.Sprintf("attempt-%03d", i); completion.AttemptID != want {
+			t.Fatalf("completion[%d] = %q, want %q", i, completion.AttemptID, want)
 		}
 	}
 }
@@ -654,6 +938,129 @@ func TestAbort(t *testing.T) {
 	}
 }
 
+func TestAbortWaitsForProcessExitBeforeCompletion(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "long task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	abortDone := make(chan error, 1)
+	go func() { abortDone <- sess.Abort(context.Background()) }()
+	select {
+	case sig := <-fp.sigCh:
+		if sig != syscall.SIGTERM {
+			t.Fatalf("signal = %v, want SIGTERM", sig)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("abort did not signal process")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := drv.Step(context.Background(), time.Now()); len(got) != 0 {
+		t.Fatalf("completion emitted before process exit: %+v", got)
+	}
+	fp.finish(fmt.Errorf("signal: terminated"))
+	select {
+	case err := <-abortDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("abort did not return after process exit")
+	}
+	got := drainSteps(drv, 1)
+	if len(got) != 1 || got[0].Status != adapter.StatusAborted {
+		t.Fatalf("completion = %+v, want one aborted after exit", got)
+	}
+}
+
+func TestAbortFallsBackToKillWhenTerminateIsUnsupported(t *testing.T) {
+	fp, _ := newFakeProc()
+	fp.termErr = errors.New("terminate unsupported")
+	fp.killExit = true
+	drv := New(Options{DisablePermissions: true})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort did not fall back to Kill: %v", err)
+	}
+	for _, want := range []os.Signal{syscall.SIGTERM, os.Kill} {
+		select {
+		case got := <-fp.sigCh:
+			if got != want {
+				t.Fatalf("signal = %v, want %v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("missing signal %v", want)
+		}
+	}
+	got := drainSteps(drv, 1)
+	if len(got) != 1 || got[0].Status != adapter.StatusAborted {
+		t.Fatalf("completion = %+v, want aborted", got)
+	}
+}
+
+func TestAbortSignalFailureDoesNotFalsifyLaterCompletion(t *testing.T) {
+	fp, _ := newFakeProc()
+	fp.termErr = errors.New("terminate failed")
+	fp.killErr = errors.New("kill failed")
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sess.Abort(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "terminate failed") || !strings.Contains(err.Error(), "kill failed") {
+		t.Fatalf("Abort error = %v, want both signal failures", err)
+	}
+	if status, err := sess.Status(context.Background()); err != nil || status != adapter.StatusRunning {
+		t.Fatalf("status after failed abort = %q, %v; want running", status, err)
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+
+	got := drainSteps(drv, 1)
+	if len(got) != 1 || got[0].Status != adapter.StatusIdle || got[0].Err != nil {
+		t.Fatalf("completion after failed abort = %+v, want successful idle", got)
+	}
+}
+
+func TestAbortAfterNaturalExitPreservesCompletion(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+	if err := sess.Abort(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := drainSteps(drv, 1)
+	if len(got) != 1 || got[0].Status != adapter.StatusIdle || got[0].Err != nil {
+		t.Fatalf("completion after natural exit = %+v, want successful idle", got)
+	}
+	select {
+	case signal := <-fp.sigCh:
+		t.Fatalf("already-exited process received signal %v", signal)
+	default:
+	}
+}
+
 // TestPermissionBroker exercises the real permission transport end to end: a
 // helper goroutine acting as claude's MCP permission tool connects to the
 // broker socket, parks a request, and waits; the scheduler-side session sees
@@ -826,6 +1233,35 @@ func TestPermissionBroker(t *testing.T) {
 	cs := drainSteps(drv, 1)
 	if len(cs) != 1 || cs[0].Status != adapter.StatusIdle {
 		t.Fatalf("completion = %+v, want a single idle", cs)
+	}
+}
+
+func TestPermissionSocketOverridePreservesNonSocketPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broker.sock")
+	const content = "keep me"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	drv := New(Options{PermissionSocket: path})
+	defer drv.Close()
+	spawned := false
+	drv.spawn = func(context.Context, spawnSpec) (process, error) {
+		spawned = true
+		return nil, errors.New("unexpected spawn")
+	}
+
+	if _, err := drv.Start(context.Background(), attemptFor("w1/1", "task")); err == nil {
+		t.Fatal("Start replaced a non-socket permission path")
+	}
+	if spawned {
+		t.Error("spawn called after unsafe socket path")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved path: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("preserved path = %q, want %q", got, content)
 	}
 }
 
@@ -1047,6 +1483,63 @@ func TestCLIProcessWaitBlocksUntilExitResultIsCached(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("wait did not return after process exit")
+	}
+}
+
+func TestCLIProcessStdoutHelper(t *testing.T) {
+	if os.Getenv("CORRAL_CLAUDE_STDOUT_HELPER") != "1" {
+		return
+	}
+	_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 4<<20))
+}
+
+func TestCLIProcessPreservesBufferedStdoutAfterFastExit(t *testing.T) {
+	proc, err := spawnCLI(context.Background(), spawnSpec{
+		command: os.Args[0],
+		args:    []string{"-test.run=^TestCLIProcessStdoutHelper$"},
+		env:     append(os.Environ(), "CORRAL_CLAUDE_STDOUT_HELPER=1"),
+		dir:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(proc.stdout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.wait(); err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(data, []byte("x")); got != 4<<20 {
+		t.Fatalf("stdout x bytes = %d, want %d", got, 4<<20)
+	}
+	if closer, ok := proc.stdout().(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestStreamScannerClosesStdoutAfterDrain(t *testing.T) {
+	fp, _ := newFakeProc()
+	tracked := &trackingReadCloser{ReadCloser: fp.r, closed: make(chan struct{})}
+	fp.out = tracked
+	drv := New(Options{DisablePermissions: true, PollInterval: 10 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+	if got := drainSteps(drv, 1); len(got) != 1 {
+		t.Fatalf("completions = %d, want 1", len(got))
+	}
+	select {
+	case <-tracked.closed:
+	case <-time.After(time.Second):
+		t.Fatal("stdout reader was not closed after stream drain")
 	}
 }
 

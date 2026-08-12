@@ -54,7 +54,7 @@ type Daemon struct {
 	apiKey string
 	ctx    context.Context
 
-	mu               sync.Mutex
+	mu               sync.RWMutex
 	runs             map[string]*sched.RunHandle
 	broker           *broker
 	eventHeartbeat   time.Duration
@@ -241,13 +241,18 @@ func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) runHandle(id string) (*sched.RunHandle, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	h, ok := d.runs[id]
+	h, ok := d.lookupRunHandle(id)
 	if !ok {
 		return nil, fmt.Errorf("unknown run %s", id)
 	}
 	return h, nil
+}
+
+func (d *Daemon) lookupRunHandle(id string) (*sched.RunHandle, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	h, ok := d.runs[id]
+	return h, ok
 }
 
 type runSummary struct {
@@ -267,7 +272,7 @@ func (d *Daemon) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	var out []runSummary
 	for _, ru := range runs {
 		sum := runSummary{ID: ru.ID, Status: ru.Status, States: map[string]string{}}
-		if h, ok := d.runs[ru.ID]; ok {
+		if h, ok := d.lookupRunHandle(ru.ID); ok {
 			sum.Done = h.Done()
 			for _, n := range ru.Graph.Nodes {
 				if st, ok := h.State(n.ID); ok {
@@ -317,7 +322,7 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		"events":           events,
 		"attempts":         attempts,
 	}
-	if h, ok := d.runs[id]; ok {
+	if h, ok := d.lookupRunHandle(id); ok {
 		states := map[string]string{}
 		for _, n := range ru.Graph.Nodes {
 			if st, ok := h.State(n.ID); ok {
@@ -400,7 +405,7 @@ func (d *Daemon) watchSnapshot(ctx context.Context, id string, since int64) (map
 
 	states := map[string]string{}
 	done := false
-	if h, ok := d.runs[id]; ok {
+	if h, ok := d.lookupRunHandle(id); ok {
 		for _, n := range ru.Graph.Nodes {
 			if st, ok := h.State(n.ID); ok {
 				states[string(n.ID)] = string(st)
@@ -500,6 +505,9 @@ func (d *Daemon) handleApprove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !d.gateActionAuthorized(w, r) {
+		return
+	}
 	d.nodeAction(w, r, func(ctx context.Context, id graph.NodeID) error { return h.ApproveNode(ctx, id) })
 }
 
@@ -509,7 +517,30 @@ func (d *Daemon) handleReject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !d.gateActionAuthorized(w, r) {
+		return
+	}
 	d.nodeAction(w, r, func(ctx context.Context, id graph.NodeID) error { return h.RejectNode(ctx, id) })
+}
+
+// gateActionAuthorized enforces the run's persisted pre-authorization
+// policy. Operators may always resolve human gates; orchestrators may do so
+// only when the run was created with autoApproveGates enabled.
+func (d *Daemon) gateActionAuthorized(w http.ResponseWriter, r *http.Request) bool {
+	role, _ := parseRole(r.Header.Get("X-Corral-Role"))
+	if role != RoleOrchestrator {
+		return true
+	}
+	ru, err := d.st.Run(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return false
+	}
+	if !ru.AutoApproveGates {
+		http.Error(w, "orchestrator is not pre-authorized to resolve human gates", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {

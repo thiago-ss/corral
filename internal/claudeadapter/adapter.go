@@ -19,9 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,7 +72,8 @@ type Driver struct {
 	mu          sync.Mutex
 	attempts    map[string]*attempt // attemptID -> rec
 	bySession   map[string]*attempt // sessionID -> rec
-	completions chan adapter.Completion
+	seen        map[string]struct{} // all successfully started attempt IDs
+	completions []adapter.Completion
 	spawn       spawnFunc
 
 	brokerOnce sync.Once
@@ -109,11 +111,11 @@ type attempt struct {
 
 func New(opts Options) *Driver {
 	return &Driver{
-		opts:        opts,
-		attempts:    map[string]*attempt{},
-		bySession:   map[string]*attempt{},
-		completions: make(chan adapter.Completion, 64),
-		spawn:       spawnCLI,
+		opts:      opts,
+		attempts:  map[string]*attempt{},
+		bySession: map[string]*attempt{},
+		seen:      map[string]struct{}{},
+		spawn:     spawnCLI,
 	}
 }
 
@@ -148,7 +150,7 @@ func (d *Driver) Start(ctx context.Context, a adapter.Attempt) (adapter.Session,
 		d.mu.Unlock()
 		return nil, fmt.Errorf("start claude: driver is closed")
 	}
-	if _, exists := d.attempts[a.ID]; exists {
+	if _, exists := d.seen[a.ID]; exists {
 		d.mu.Unlock()
 		return nil, fmt.Errorf("start claude: attempt %q already started", a.ID)
 	}
@@ -178,6 +180,7 @@ func (d *Driver) Start(ctx context.Context, a adapter.Attempt) (adapter.Session,
 	}
 	d.attempts[a.ID] = at
 	d.bySession[spec.sessionID] = at
+	d.seen[a.ID] = struct{}{}
 	d.mu.Unlock()
 
 	go d.scan(at)
@@ -246,15 +249,11 @@ func (d *Driver) modelFor(a adapter.Attempt) string {
 
 // Step drains completed attempts (non-blocking).
 func (d *Driver) Step(_ context.Context, _ time.Time) []adapter.Completion {
-	var out []adapter.Completion
-	for {
-		select {
-		case c := <-d.completions:
-			out = append(out, c)
-		default:
-			return out
-		}
-	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := d.completions
+	d.completions = nil
+	return out
 }
 
 // attemptBySession returns the attempt owning a session id, if any.
@@ -308,7 +307,8 @@ type processExit struct {
 // event queue. On a read failure it continues draining stdout before Wait so a
 // child blocked on a full pipe cannot deadlock shutdown.
 func (d *Driver) scan(at *attempt) {
-	r := bufio.NewReader(at.proc.stdout())
+	stdout := at.proc.stdout()
+	r := bufio.NewReader(stdout)
 	var readErr error
 	for {
 		line, err := r.ReadBytes('\n')
@@ -328,6 +328,11 @@ func (d *Driver) scan(at *attempt) {
 		break
 	}
 	exit := processExit{waitErr: at.proc.wait(), readErr: readErr}
+	// Release the parent read descriptor only after all output is drained, but
+	// before publishing process exit so completion implies stdout is closed.
+	if closer, ok := stdout.(io.Closer); ok {
+		_ = closer.Close()
+	}
 	select {
 	case at.exitedCh <- exit:
 	default: // watcher already gone (driver closed)
@@ -337,13 +342,13 @@ func (d *Driver) scan(at *attempt) {
 // watch drives an attempt to a terminal state. The event stream is the
 // primary signal; a poll ticker is the reconciliation fallback.
 func (at *attempt) watch(ctx context.Context) {
+	defer at.cleanup()
 	poll := time.NewTicker(at.d.opts.poll())
 	defer poll.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			at.terminate()
-			at.cleanup()
 			return
 		case <-poll.C:
 			at.d.maybeComplete(context.Background(), at)
@@ -417,7 +422,7 @@ func (at *attempt) terminate() {
 		return
 	default:
 	}
-	_ = at.proc.signal(syscall.SIGKILL)
+	_ = at.proc.signal(os.Kill)
 	select {
 	case <-at.proc.done():
 	case <-time.After(2 * time.Second):
@@ -479,6 +484,18 @@ func (at *attempt) snapshot() []adapter.Message {
 	return out
 }
 
+func (at *attempt) appendDiffs(diffs []adapter.Diff) {
+	if len(diffs) == 0 {
+		return
+	}
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	// OpenCode exposes authoritative diff summaries on user messages. Keep
+	// the same adapter contract for Claude so default verification and
+	// reviewers consume provider-independent evidence.
+	at.transcript = append(at.transcript, adapter.Message{Role: "user", Diffs: diffs})
+}
+
 func (at *attempt) currentSessionID() string {
 	at.mu.Lock()
 	defer at.mu.Unlock()
@@ -489,13 +506,13 @@ func (at *attempt) currentSessionID() string {
 // what adapter.Status it maps to. Aborted attempts are terminal
 // immediately; otherwise a result/error/exit event must have been seen.
 func (at *attempt) terminalStatus() (adapter.Status, bool) {
-	if at.aborted.Load() {
-		return adapter.StatusAborted, true
-	}
 	at.mu.Lock()
 	defer at.mu.Unlock()
 	if !at.exited {
 		return "", false
+	}
+	if at.aborted.Load() {
+		return adapter.StatusAborted, true
 	}
 	if !at.terminal {
 		return "", false
@@ -549,18 +566,206 @@ func (d *Driver) maybeComplete(ctx context.Context, at *attempt) {
 	if !at.completed.CompareAndSwap(false, true) {
 		return // duplicate event; already handled
 	}
+	completionErr := at.completionError()
+	if status == adapter.StatusIdle {
+		diffs, err := captureGitDiffs(ctx, at.cwd)
+		if err != nil {
+			// Verification must never receive a successful completion carrying
+			// partial or missing evidence for a Git worktree. A plain non-Git
+			// cwd is intentionally exempt and returns (nil, nil) below.
+			status = adapter.StatusError
+			completionErr = errors.Join(completionErr, fmt.Errorf("capture git diff evidence: %w", err))
+		} else {
+			at.appendDiffs(diffs)
+		}
+	}
 	c := adapter.Completion{
 		AttemptID: at.attemptID,
 		SessionID: at.currentSessionID(),
 		Status:    status,
 		Messages:  at.snapshot(),
-		Err:       at.completionError(),
+		Err:       completionErr,
 	}
-	select {
-	case d.completions <- c:
+	d.mu.Lock()
+	if !d.closed {
+		d.completions = append(d.completions, c)
+	}
+	d.mu.Unlock()
+}
+
+// captureGitDiffs reads all tracked and untracked worktree changes against
+// HEAD without touching the index. Attempts outside a Git worktree (or with
+// no changes) simply provide no evidence. Once cwd is confirmed as a Git
+// worktree, collection is atomic: any command or parse failure returns no
+// diffs and an error so verification fails closed instead of seeing a partial
+// change set.
+func captureGitDiffs(ctx context.Context, cwd string) ([]adapter.Diff, error) {
+	if strings.TrimSpace(cwd) == "" {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	inside, err := gitOutput(ctx, cwd, false, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		if isNotGitRepository(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(string(inside)) != "true" {
+		return nil, nil
+	}
+	statusOut, err := gitOutput(ctx, cwd, false,
+		"diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := map[string]string{}
+	untrackedPaths := map[string]bool{}
+	fields := splitNUL(statusOut)
+	if len(fields)%2 != 0 {
+		return nil, fmt.Errorf("parse git name-status: odd field count %d", len(fields))
+	}
+	for i := 0; i+1 < len(fields); i += 2 {
+		statuses[fields[i+1]] = diffStatus(fields[i])
+	}
+	untracked, err := gitOutput(ctx, cwd, false,
+		"ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range splitNUL(untracked) {
+		statuses[path] = "added"
+		untrackedPaths[path] = true
+	}
+
+	paths := make([]string, 0, len(statuses))
+	for path := range statuses {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	diffs := make([]adapter.Diff, 0, len(paths))
+	for _, path := range paths {
+		untracked := untrackedPaths[path]
+		args := []string{"diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--no-renames"}
+		if untracked {
+			args = append(args, "--no-index", "--", "/dev/null", path)
+		} else {
+			args = append(args, "HEAD", "--", path)
+		}
+		patch, err := gitOutput(ctx, cwd, untracked, args...)
+		if err != nil {
+			return nil, err
+		}
+		if len(patch) == 0 {
+			return nil, fmt.Errorf("git returned no patch for changed path %q", path)
+		}
+
+		statArgs := []string{"diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--no-renames"}
+		if untracked {
+			statArgs = append(statArgs, "--no-index", "--", "/dev/null", path)
+		} else {
+			statArgs = append(statArgs, "HEAD", "--", path)
+		}
+		stat, err := gitOutput(ctx, cwd, untracked, statArgs...)
+		if err != nil {
+			return nil, err
+		}
+		additions, deletions, err := parseNumstat(stat)
+		if err != nil {
+			return nil, fmt.Errorf("parse git numstat for %q: %w", path, err)
+		}
+		diffs = append(diffs, adapter.Diff{
+			File: path, Patch: string(patch), Additions: additions,
+			Deletions: deletions, Status: statuses[path],
+		})
+	}
+	return diffs, nil
+}
+
+func gitOutput(ctx context.Context, cwd string, allowDiffExit bool, args ...string) ([]byte, error) {
+	displayArgs := append([]string(nil), args...)
+	args = append([]string{"-c", "core.fsmonitor=false"}, args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil
+	}
+	var exitErr *exec.ExitError
+	if allowDiffExit && errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return out, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail != "" {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(displayArgs, " "), err, detail)
+	}
+	return nil, fmt.Errorf("git %s: %w", strings.Join(displayArgs, " "), err)
+}
+
+func isNotGitRepository(err error) bool {
+	return strings.Contains(err.Error(), "not a git repository")
+}
+
+func splitNUL(data []byte) []string {
+	raw := bytes.Split(data, []byte{0})
+	out := make([]string, 0, len(raw))
+	for _, field := range raw {
+		if len(field) > 0 {
+			out = append(out, string(field))
+		}
+	}
+	return out
+}
+
+func diffStatus(code string) string {
+	switch {
+	case strings.HasPrefix(code, "A"):
+		return "added"
+	case strings.HasPrefix(code, "D"):
+		return "deleted"
 	default:
-		log.Printf("claudeadapter: completion channel full; dropping %s", at.attemptID)
+		return "modified"
 	}
+}
+
+func parseNumstat(data []byte) (additions, deletions int, err error) {
+	line := data
+	if i := bytes.IndexByte(line, 0); i >= 0 {
+		line = line[:i]
+	}
+	first := bytes.IndexByte(line, '\t')
+	if first < 0 {
+		return 0, 0, fmt.Errorf("missing additions field")
+	}
+	secondRel := bytes.IndexByte(line[first+1:], '\t')
+	if secondRel < 0 {
+		return 0, 0, fmt.Errorf("missing deletions field")
+	}
+	second := first + 1 + secondRel
+	parse := func(field []byte) (int, error) {
+		if bytes.Equal(field, []byte("-")) { // binary diff
+			return 0, nil
+		}
+		return strconv.Atoi(string(field))
+	}
+	additions, err = parse(line[:first])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid additions: %w", err)
+	}
+	deletions, err = parse(line[first+1 : second])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid deletions: %w", err)
+	}
+	return additions, deletions, nil
 }
 
 // session implements adapter.Session and adapter.PermissionSession for a
@@ -583,25 +788,41 @@ func (s *session) Send(_ context.Context, text string) error {
 }
 
 func (s *session) Abort(ctx context.Context) error {
-	s.at.aborted.Store(true)
+	// Serialize successful signal delivery with onExit/terminalStatus. This
+	// prevents a fast process exit from publishing an idle completion between
+	// signal delivery and marking the attempt aborted, while still ensuring
+	// failed signals never falsify the provider state.
+	s.at.mu.Lock()
 	select {
 	case <-s.at.proc.done():
-		return nil // already exited
+		s.at.mu.Unlock()
+		return nil // already exited naturally; preserve its terminal status
 	default:
 	}
 	// SIGTERM is Claude Code's graceful stop (it aborts the turn, runs
-	// SessionEnd hooks and exits 143); SIGKILL is the hard fallback.
-	if err := s.at.proc.signal(syscall.SIGTERM); err != nil {
-		return err
+	// SessionEnd hooks and exits 143). Some platforms only implement Kill.
+	if termErr := s.at.proc.signal(syscall.SIGTERM); termErr != nil {
+		if killErr := s.at.proc.signal(os.Kill); killErr != nil {
+			select {
+			case <-s.at.proc.done():
+				s.at.mu.Unlock()
+				return nil // raced with natural exit; neither signal succeeded
+			default:
+			}
+			s.at.mu.Unlock()
+			return errors.Join(termErr, killErr)
+		}
 	}
+	s.at.aborted.Store(true)
+	s.at.mu.Unlock()
 	select {
 	case <-s.at.proc.done():
 		return nil
 	case <-ctx.Done():
-		_ = s.at.proc.signal(syscall.SIGKILL)
+		_ = s.at.proc.signal(os.Kill)
 		return ctx.Err()
 	case <-time.After(5 * time.Second):
-		return s.at.proc.signal(syscall.SIGKILL)
+		return s.at.proc.signal(os.Kill)
 	}
 }
 
@@ -679,13 +900,44 @@ func promptFor(a adapter.Attempt) string {
 	return b.String()
 }
 
-// allowedTools maps an attempt's write scope onto Claude Code permission
-// rules: read-only tools are always approved and scoped Edit rules cover
-// each writable path, so in-scope work runs without prompts.
+// allowedTools maps a writing attempt's scope onto Claude Code permission
+// rules. Non-writing roles stay read-only even if a malformed graph supplies
+// a write scope; role is the scheduler's authority boundary.
 func allowedTools(a adapter.Attempt) []string {
 	tools := []string{"Read", "Glob", "Grep"}
+	if a.Role != "" && a.Role != "worker" {
+		return tools
+	}
+	seen := map[string]bool{"Read": true, "Glob": true, "Grep": true}
+	add := func(tool string) {
+		if !seen[tool] {
+			seen[tool] = true
+			tools = append(tools, tool)
+		}
+	}
+	if len(a.WriteScope) == 0 {
+		add("Edit")
+		add("Write")
+	}
 	for _, p := range a.WriteScope {
-		tools = append(tools, "Edit("+p+")", "Write("+p+")")
+		p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
+		if p == "" {
+			continue
+		}
+		if p == "*" || p == "." {
+			add("Edit")
+			add("Write")
+			continue
+		}
+		p = strings.TrimSuffix(p, "/")
+		add("Edit(" + p + ")")
+		add("Write(" + p + ")")
+		// A declared directory scope covers descendants too. Adding this for
+		// a file scope is harmless and avoids guessing from filesystem state.
+		if !strings.ContainsAny(p, "*?[") {
+			add("Edit(" + p + "/**)")
+			add("Write(" + p + "/**)")
+		}
 	}
 	return tools
 }
@@ -846,25 +1098,22 @@ func spawnCLI(ctx context.Context, spec spawnSpec) (process, error) {
 	cmd := exec.CommandContext(ctx, spec.command, spec.args...)
 	cmd.Dir = spec.dir
 	cmd.Env = spec.env
-	in, err := cmd.StdinPipe()
+	out, childOut, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	errw, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
+	cmd.Stdout = childOut
+	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
+		_ = out.Close()
+		_ = childOut.Close()
 		return nil, err
 	}
-	// The prompt comes from argv; never stream to stdin, and drain stderr
-	// so a chatty CLI cannot deadlock the process.
-	_ = in.Close()
-	go io.Copy(io.Discard, errw)
+	// The prompt comes from argv, so stdin stays closed. Close the parent's
+	// writer copy after Start; the child's inherited descriptor keeps the pipe
+	// open until exit. Unlike Cmd.StdoutPipe, this lets Wait run concurrently
+	// without closing unread buffered output.
+	_ = childOut.Close()
 	p := &cliProcess{cmd: cmd, out: out, doneCh: make(chan struct{})}
 	go func() {
 		err := cmd.Wait()

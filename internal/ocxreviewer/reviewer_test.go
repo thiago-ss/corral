@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"corral/internal/adapter"
+	"corral/internal/assets"
 	"corral/internal/livetest"
 	"corral/internal/ocx"
 	"corral/internal/spike"
@@ -25,11 +26,14 @@ import (
 // script surface. The last transcript repeats, so a reviewer that keeps
 // polling settles on it deterministically.
 type fakeLLM struct {
-	mu       sync.Mutex
-	steps    [][]ocx.Message
-	step     int
-	prompts  []string
-	sessions int
+	mu           sync.Mutex
+	steps        [][]ocx.Message
+	step         int
+	prompts      []string
+	promptAgents []string
+	promptTools  []map[string]bool
+	directories  []string
+	sessions     int
 }
 
 func newFakeLLM(steps ...[]ocx.Message) *fakeLLM {
@@ -40,17 +44,22 @@ func (f *fakeLLM) serve() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.directories = append(f.directories, r.URL.Query().Get("directory"))
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/session":
 			f.sessions++
 			_ = json.NewEncoder(w).Encode(ocx.Session{ID: "ses_1", Directory: "proj", Title: "review"})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
 			var body struct {
+				Agent string          `json:"agent"`
+				Tools map[string]bool `json:"tools"`
 				Parts []struct {
 					Text string `json:"text"`
 				} `json:"parts"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.promptAgents = append(f.promptAgents, body.Agent)
+			f.promptTools = append(f.promptTools, body.Tools)
 			for _, p := range body.Parts {
 				f.prompts = append(f.prompts, p.Text)
 			}
@@ -73,11 +82,19 @@ func llmBusy() []ocx.Message {
 }
 
 func llmText(text string) ocx.Message {
+	return llmTextParts(text)
+}
+
+func llmTextParts(texts ...string) ocx.Message {
 	finish := "stop"
-	part, _ := json.Marshal(map[string]string{"type": "text", "text": text})
+	parts := make([]json.RawMessage, 0, len(texts))
+	for _, text := range texts {
+		part, _ := json.Marshal(map[string]string{"type": "text", "text": text})
+		parts = append(parts, part)
+	}
 	return ocx.Message{
 		Info:  ocx.MessageInfo{Role: "assistant", Finish: &finish},
-		Parts: []json.RawMessage{part},
+		Parts: parts,
 	}
 }
 
@@ -117,8 +134,10 @@ func TestReviewerApproved(t *testing.T) {
 	srv := llm.serve()
 	defer srv.Close()
 
-	drv := New(ocx.New(srv.URL, t.TempDir()), Options{PollInterval: time.Millisecond, Timeout: 5 * time.Second})
-	approved, note, err := drv.Review(context.Background(), reviewReq(t.TempDir()))
+	mainDir := t.TempDir()
+	worktree := t.TempDir()
+	drv := New(ocx.New(srv.URL, mainDir), Options{PollInterval: time.Millisecond, Timeout: 5 * time.Second})
+	approved, note, err := drv.Review(context.Background(), reviewReq(worktree))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +151,17 @@ func TestReviewerApproved(t *testing.T) {
 	if len(llm.prompts) != 1 {
 		t.Fatalf("review prompts = %d, want 1", len(llm.prompts))
 	}
+	if got := llm.promptAgents[0]; got != "corral-reviewer" {
+		t.Errorf("review agent = %q, want %q", got, "corral-reviewer")
+	}
+	if got := llm.promptTools[0]; len(got) != 1 || got["*"] {
+		t.Errorf("review tools = %#v, want wildcard deny", got)
+	}
+	for _, directory := range llm.directories {
+		if directory != mainDir {
+			t.Errorf("review request directory = %q, want main project %q", directory, mainDir)
+		}
+	}
 	for _, want := range []string{"OBJECTIVE", "create manifest.json", "PRIOR FEEDBACK", "DIFF ARTIFACT", "manifest.json", "CHECK RESULTS", "exit=0"} {
 		if !strings.Contains(llm.prompts[0], want) {
 			t.Errorf("prompt missing %q", want)
@@ -140,7 +170,7 @@ func TestReviewerApproved(t *testing.T) {
 }
 
 func TestReviewerNotApproved(t *testing.T) {
-	llm := newFakeLLM([]ocx.Message{llmText("NOT_APPROVED\nNote: the manifest is still missing the required count field.")})
+	llm := newFakeLLM([]ocx.Message{llmText("CHANGES_REQUESTED\nNote: the manifest is still missing the required count field.")})
 	srv := llm.serve()
 	defer srv.Close()
 
@@ -167,6 +197,17 @@ func TestReviewerSessionError(t *testing.T) {
 		t.Fatal("session error not surfaced")
 	} else if !strings.Contains(err.Error(), "MessageAbortedError") {
 		t.Fatalf("error = %q, want session error name", err)
+	}
+}
+
+func TestReviewerTerminalFinishReasons(t *testing.T) {
+	toolCalls := "tool-calls"
+	if terminal, errName := terminal([]ocx.Message{{Info: ocx.MessageInfo{Role: "assistant", Finish: &toolCalls}}}); terminal || errName != "" {
+		t.Fatalf("tool-calls = terminal %v error %q, want still running", terminal, errName)
+	}
+	length := "length"
+	if terminal, errName := terminal([]ocx.Message{{Info: ocx.MessageInfo{Role: "assistant", Finish: &length}}}); !terminal || !strings.Contains(errName, "length") {
+		t.Fatalf("length = terminal %v error %q, want provider error", terminal, errName)
 	}
 }
 
@@ -204,11 +245,17 @@ func TestParseVerdict(t *testing.T) {
 		ok       bool
 	}{
 		{"APPROVED\nNote: good work", true, "good work", true},
-		{"NOT_APPROVED\nNote: missing tests", false, "missing tests", true},
-		{"NOT APPROVED.\nNote: wrong order.", false, "wrong order.", true},
-		{"We approve.\nAPPROVED\nNote: verified by hand.", true, "verified by hand.", true},
+		{"APPROVED\nNote: good work\n", true, "good work", true},
+		{"APPROVED\r\nNote: good work\r\n", true, "good work", true},
+		{"CHANGES_REQUESTED\nNote: missing tests", false, "missing tests", true},
 		{"no verdict anywhere", false, "", false},
-		{"NOT_APPROVED without a note", false, "", true},
+		{"NOT_APPROVED\nNote: legacy verdict", false, "", false},
+		{"NOT APPROVED\nNote: legacy verdict", false, "", false},
+		{"We approve.\nAPPROVED\nNote: embedded verdict", false, "", false},
+		{"APPROVED\nNote:", false, "", false},
+		{"APPROVED\nNote: valid\nextra", false, "", false},
+		{"approved\nNote: wrong case", false, "", false},
+		{"APPROVED Note: one line", false, "", false},
 	}
 	for _, c := range cases {
 		approved, note, ok := parseVerdict(c.text)
@@ -217,6 +264,25 @@ func TestParseVerdict(t *testing.T) {
 				c.text, approved, note, ok, c.approved, c.note, c.ok)
 		}
 	}
+}
+
+func TestVerdictRejectsTextOutsideExactResponse(t *testing.T) {
+	t.Run("extra text part", func(t *testing.T) {
+		msgs := []ocx.Message{llmTextParts("Here is my decision:\n", "APPROVED\nNote: verified")}
+		if _, _, err := verdict(msgs); err == nil {
+			t.Fatal("verdict accepted response with extra text part")
+		}
+	})
+
+	t.Run("stale prior verdict", func(t *testing.T) {
+		msgs := []ocx.Message{
+			llmText("APPROVED\nNote: stale"),
+			llmText("I cannot decide."),
+		}
+		if _, _, err := verdict(msgs); err == nil {
+			t.Fatal("verdict accepted stale prior assistant response")
+		}
+	})
 }
 
 func TestPromptForIncludesEvidence(t *testing.T) {
@@ -233,7 +299,7 @@ func TestPromptForIncludesEvidence(t *testing.T) {
 		"exit=0",
 		"TRANSCRIPT",
 		"VERDICT",
-		"NOT_APPROVED",
+		"CHANGES_REQUESTED",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
@@ -242,13 +308,9 @@ func TestPromptForIncludesEvidence(t *testing.T) {
 }
 
 func TestReviewToolsAreReadOnly(t *testing.T) {
-	for _, name := range []string{"bash", "edit", "write", "apply_patch"} {
-		enabled, explicit := reviewTools[name]
-		if !explicit {
-			t.Errorf("%s tool has no explicit deny rule", name)
-		} else if enabled {
-			t.Errorf("%s tool enabled in read-only reviewer", name)
-		}
+	reviewTools := denyTools()
+	if len(reviewTools) != 1 || reviewTools["*"] {
+		t.Fatalf("review tools = %#v, want wildcard deny", reviewTools)
 	}
 }
 
@@ -273,6 +335,9 @@ func TestOpenCodeReviewerLive(t *testing.T) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(proj, "manifest.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "opencode.json"), []byte(assets.OpenCodeConfigJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

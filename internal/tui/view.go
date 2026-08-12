@@ -5,8 +5,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -73,6 +75,23 @@ func (m *Model) View() string {
 	return ""
 }
 
+func stripUnsafeControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func safeText(s string) string {
+	return stripUnsafeControls(ansi.Strip(s))
+}
+
 func (m *Model) viewList() string {
 	var b strings.Builder
 	b.WriteString(styleHeader.Render("corral — runs") + "\n\n")
@@ -80,7 +99,7 @@ func (m *Model) viewList() string {
 		b.WriteString(styleDim.Render("no runs yet; start one from OpenCode (corral_start) or the daemon API") + "\n")
 	} else {
 		for i, r := range m.runs {
-			line := fmt.Sprintf(" %-28s %-10s %s", r.ID, r.Status, r.StateSummary())
+			line := fmt.Sprintf(" %-28s %-10s %s", safeText(r.ID), safeText(r.Status), r.StateSummary())
 			if i == m.cursor {
 				line = styleSelected.Render(line)
 			}
@@ -99,7 +118,7 @@ func (m *Model) viewDetail() string {
 		return "loading…"
 	}
 	var b strings.Builder
-	b.WriteString(styleTitle.Render(fmt.Sprintf("run %s  [%s]", m.detail.RunID, m.detail.Status)))
+	b.WriteString(styleTitle.Render(fmt.Sprintf("run %s  [%s]", safeText(m.detail.RunID), safeText(m.detail.Status))))
 	if m.detail.Status == "completed" {
 		b.WriteString(styleOK.Render(" ✓ done"))
 	}
@@ -127,15 +146,12 @@ func (m *Model) viewDetail() string {
 	for _, n := range nodes {
 		byID[n.ID] = n
 	}
-	// Topological-ish order: by state then id for stable rendering.
-	order := append([]GraphNode(nil), nodes...)
-	sort.SliceStable(order, func(i, j int) bool { return order[i].ID < order[j].ID })
 	indeg := map[string]int{}
-	for _, n := range order {
+	for _, n := range nodes {
 		indeg[n.ID] = len(n.DependsOn)
 	}
 	selected, _ := m.nodeAt(m.nodeCursor)
-	for _, n := range order {
+	for _, n := range nodes {
 		line := "  " + m.nodeLine(n, indeg[n.ID])
 		if n.ID == selected {
 			line = styleSelected.Render(line)
@@ -143,7 +159,7 @@ func (m *Model) viewDetail() string {
 		b.WriteString(line + "\n")
 		for _, dep := range n.DependsOn {
 			if dn, ok := byID[dep]; ok {
-				b.WriteString(styleDim.Render(fmt.Sprintf("      ← %s (%s)\n", dep, m.detail.States[dep])))
+				b.WriteString(styleDim.Render(fmt.Sprintf("      ← %s (%s)\n", safeText(dep), safeText(m.detail.States[dep]))))
 				_ = dn
 			}
 		}
@@ -154,8 +170,8 @@ func (m *Model) viewDetail() string {
 
 func (m *Model) nodeLine(n GraphNode, deps int) string {
 	state := m.detail.States[n.ID]
-	st := stateColor(state).Render(pad(state, 10))
-	typ := styleDim.Render(n.Type)
+	st := stateColor(state).Render(pad(safeText(state), 10))
+	typ := styleDim.Render(safeText(n.Type))
 	prio := styleDim.Render(fmt.Sprintf("p%d", n.Priority))
 	atts := m.detail.Attempts[n.ID]
 	attempts := styleDim.Render(fmt.Sprintf("%d att", len(atts)))
@@ -166,16 +182,16 @@ func (m *Model) nodeLine(n GraphNode, deps int) string {
 	permS := ""
 	if state == "blocked" {
 		if pid, ok := m.pendingPermission(n.ID); ok {
-			permS = styleTitle.Render(fmt.Sprintf("perm:%s", pid))
+			permS = styleTitle.Render(fmt.Sprintf("perm:%s", safeText(pid)))
 		}
 	}
 	bar := m.nodeBudgetBar(n, atts, state)
-	return fmt.Sprintf("%-12s %s %-7s %s %s %s %s %s", n.ID, st, typ, prio, attempts, depsS, bar, permS)
+	return fmt.Sprintf("%-12s %s %-7s %s %s %s %s %s", safeText(n.ID), st, typ, prio, attempts, depsS, bar, permS)
 }
 
 // nodeBudgetBar renders a compact budget-usage bar for a node. The
-// dominant budget dimension (time, tokens, or cost) drives the bar, with
-// the used/limit figures beside it. Nodes without a budget show "".
+// dominant budget dimension (provider runtime, tokens, or cost) drives the
+// bar, with the used/limit figures beside it. Nodes without a budget show "".
 func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, _ string) string {
 	maxDur := n.Budget.MaxDuration
 	maxTok := n.Budget.MaxTokens
@@ -183,23 +199,26 @@ func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, _ string) string 
 	if maxDur <= 0 && maxTok <= 0 && maxCost <= 0 {
 		return ""
 	}
-	// Used figures, from the most recent attempt for time and the sum for
+	// Used figures, from the most recent attempt for runtime and the sum for
 	// tokens/cost.
 	var usedDur time.Duration
+	timeLabel := "wall elapsed"
 	usedTok := 0
 	usedCost := 0.0
 	if len(atts) > 0 {
 		at := atts[len(atts)-1]
-		start := m.now()
-		if at.StartedAt != nil {
-			start = time.UnixMilli(*at.StartedAt)
-		}
-		end := m.now()
-		if at.FinishedAt != nil {
-			end = time.UnixMilli(*at.FinishedAt)
-		}
-		if end.After(start) {
-			usedDur = end.Sub(start)
+		if runtime, exact := m.attemptRuntime(n.ID, at); exact {
+			usedDur = runtime
+			timeLabel = "runtime"
+		} else if at.StartedAt != nil {
+			start := time.UnixMilli(*at.StartedAt)
+			end := m.now()
+			if at.FinishedAt != nil {
+				end = time.UnixMilli(*at.FinishedAt)
+			}
+			if end.After(start) {
+				usedDur = end.Sub(start)
+			}
 		}
 	}
 	for _, at := range atts {
@@ -222,7 +241,7 @@ func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, _ string) string 
 	if maxDur > 0 {
 		consider(usage{
 			fraction: float64(usedDur) / float64(time.Duration(maxDur)),
-			label:    fmt.Sprintf("time %s/%s", usedDur.Round(time.Second), time.Duration(maxDur).Round(time.Second)),
+			label:    fmt.Sprintf("%s %s/%s", timeLabel, usedDur.Round(time.Second), time.Duration(maxDur).Round(time.Second)),
 		})
 	}
 	if maxTok > 0 {
@@ -238,6 +257,59 @@ func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, _ string) string 
 		})
 	}
 	return progressBar(dominant.fraction, 8) + " " + styleMuted.Render(dominant.label)
+}
+
+// attemptRuntime sums intervals in which the provider session was running.
+// Durable transition events make permission-blocked intervals visible, so
+// those waits do not consume the displayed runtime budget. Older/incomplete
+// event histories return exact=false and are shown explicitly as wall elapsed.
+func (m *Model) attemptRuntime(nodeID string, at AttemptView) (time.Duration, bool) {
+	if m.detail == nil || at.StartedAt == nil {
+		return 0, false
+	}
+	var startSeq int64
+	for _, event := range m.detail.Events {
+		if event.Type == "attempt" && event.AttemptID == at.ID {
+			startSeq = event.Seq
+			break
+		}
+	}
+	if startSeq == 0 {
+		return 0, false
+	}
+
+	start := *at.StartedAt
+	end := m.now().UnixMilli()
+	if at.FinishedAt != nil {
+		end = *at.FinishedAt
+	}
+	if end < start {
+		end = start
+	}
+
+	active := true
+	activeSince := start
+	var usedMillis int64
+	for _, event := range m.detail.Events {
+		if event.Seq <= startSeq || event.NodeID != nodeID || event.Type != "transition" || event.CreatedAt < start || event.CreatedAt > end {
+			continue
+		}
+		if active && event.From == "running" && event.To != "running" {
+			if event.CreatedAt > activeSince {
+				usedMillis += event.CreatedAt - activeSince
+			}
+			active = false
+			continue
+		}
+		if !active && event.To == "running" {
+			active = true
+			activeSince = event.CreatedAt
+		}
+	}
+	if active && end > activeSince {
+		usedMillis += end - activeSince
+	}
+	return time.Duration(usedMillis) * time.Millisecond, true
 }
 
 // now returns the model's wall-clock reference (last tick time, or real
@@ -259,28 +331,36 @@ func (m *Model) viewInspect() string {
 		return "node gone"
 	}
 	state := m.detail.States[n.ID]
-	b.WriteString(styleTitle.Render(fmt.Sprintf("node %s  %s", n.ID, stateColor(state).Render(state))) + "\n\n")
-	b.WriteString(styleDim.Render("objective: ") + n.Objective + "\n")
+	b.WriteString(styleTitle.Render(fmt.Sprintf("node %s  %s", safeText(n.ID), stateColor(state).Render(safeText(state)))) + "\n\n")
+	b.WriteString(styleDim.Render("objective: ") + safeText(n.Objective) + "\n")
 	if n.Role != "" {
-		b.WriteString(styleDim.Render("role: ") + n.Role + "\n")
+		b.WriteString(styleDim.Render("role: ") + safeText(n.Role) + "\n")
 	}
 	if len(n.WriteScope) > 0 {
-		b.WriteString(styleDim.Render("write scope: ") + strings.Join(n.WriteScope, ", ") + "\n")
+		scopes := make([]string, len(n.WriteScope))
+		for i, scope := range n.WriteScope {
+			scopes[i] = safeText(scope)
+		}
+		b.WriteString(styleDim.Render("write scope: ") + strings.Join(scopes, ", ") + "\n")
 	}
 	if n.Verification != nil {
-		b.WriteString(styleDim.Render("verification: ") + n.Verification.Kind + " " + strings.Join(n.Verification.Command, " ") + "\n")
+		command := make([]string, len(n.Verification.Command))
+		for i, arg := range n.Verification.Command {
+			command[i] = safeText(arg)
+		}
+		b.WriteString(styleDim.Render("verification: ") + safeText(n.Verification.Kind) + " " + strings.Join(command, " ") + "\n")
 	}
 	if pid, ok := m.pendingPermission(n.ID); ok {
-		b.WriteString(styleDim.Render("permission: ") + styleTitle.Render(pid) + styleMuted.Render(" pending — p allow · d deny") + "\n")
+		b.WriteString(styleDim.Render("permission: ") + styleTitle.Render(safeText(pid)) + styleMuted.Render(" pending — p allow · d deny") + "\n")
 	}
 	b.WriteString("\n" + styleDim.Render("attempts") + "\n")
 	for _, at := range m.detail.Attempts[n.ID] {
-		b.WriteString(fmt.Sprintf("  #%d %-10s", at.No, stateColor(at.Status).Render(at.Status)))
+		b.WriteString(fmt.Sprintf("  #%d %-10s", at.No, stateColor(at.Status).Render(safeText(at.Status))))
 		if at.SessionID != "" {
-			b.WriteString(styleMuted.Render(" session=" + at.SessionID))
+			b.WriteString(styleMuted.Render(" session=" + safeText(at.SessionID)))
 		}
 		if at.Worktree != "" {
-			b.WriteString(styleMuted.Render(" worktree=" + shortPath(at.Worktree)))
+			b.WriteString(styleMuted.Render(" worktree=" + shortPath(safeText(at.Worktree))))
 		}
 		if at.StartedAt != nil {
 			b.WriteString(styleMuted.Render(" " + elapsed(*at.StartedAt, at.FinishedAt)))
@@ -290,7 +370,7 @@ func (m *Model) viewInspect() string {
 			b.WriteString(styleMuted.Render(fmt.Sprintf("     $%.4f  %d tok\n", at.Cost, at.Tokens)))
 		}
 		if at.Evidence != "" {
-			b.WriteString(styleMuted.Render("     evidence: "+shortLine(at.Evidence, 90)) + "\n")
+			b.WriteString(styleMuted.Render("     evidence: "+shortLine(safeText(at.Evidence), 90)) + "\n")
 		}
 	}
 	// Live attempt tail for the current (running) attempt.
@@ -300,7 +380,7 @@ func (m *Model) viewInspect() string {
 			b.WriteString(styleMuted.Render("  (no output yet)\n"))
 		} else {
 			for _, ln := range m.tail {
-				b.WriteString(styleMuted.Render("  "+shortLine(ln, 90)) + "\n")
+				b.WriteString(styleMuted.Render("  "+shortLine(safeText(ln), 90)) + "\n")
 			}
 		}
 	}
@@ -310,8 +390,8 @@ func (m *Model) viewInspect() string {
 
 func (m *Model) viewSteer() string {
 	var b strings.Builder
-	b.WriteString(styleTitle.Render(fmt.Sprintf("steer %s/%s", m.selectedID, m.steerNode)) + "\n\n")
-	b.WriteString("message: " + m.steerInput + "▌\n\n")
+	b.WriteString(styleTitle.Render(fmt.Sprintf("steer %s/%s", safeText(m.selectedID), safeText(m.steerNode))) + "\n\n")
+	b.WriteString("message: " + safeText(m.steerInput) + "▌\n\n")
 	b.WriteString(m.footer("type message · enter send · esc cancel"))
 	return b.String()
 }
@@ -320,10 +400,10 @@ func (m *Model) footer(keys string) string {
 	var b strings.Builder
 	b.WriteString(styleDim.Render("── " + keys))
 	if m.status != "" {
-		b.WriteString(styleOK.Render("  · " + m.status))
+		b.WriteString(styleOK.Render("  · " + safeText(m.status)))
 	}
 	if m.err != nil {
-		b.WriteString(styleError.Render("  · " + m.err.Error()))
+		b.WriteString(styleError.Render("  · " + safeText(m.err.Error())))
 	}
 	return b.String()
 }
@@ -343,7 +423,7 @@ func (m *Model) findNode(id string) *GraphNode {
 func (r RunSummary) StateSummary() string {
 	var parts []string
 	for _, id := range sortedKeys(r.States) {
-		parts = append(parts, fmt.Sprintf("%s:%s", id, stateColor(r.States[id]).Render(r.States[id])))
+		parts = append(parts, fmt.Sprintf("%s:%s", safeText(id), stateColor(r.States[id]).Render(safeText(r.States[id]))))
 	}
 	return strings.Join(parts, " ")
 }
@@ -380,11 +460,14 @@ func shortPath(p string) string {
 }
 
 func elapsed(start int64, end *int64) string {
-	e := start
+	e := time.Now().UnixMilli()
 	if end != nil {
 		e = *end
 	}
 	d := time.Duration(e-start) * time.Millisecond
+	if d < 0 {
+		d = 0
+	}
 	if d < time.Second {
 		return fmt.Sprintf("%dms", d.Milliseconds())
 	}

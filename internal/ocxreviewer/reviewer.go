@@ -2,19 +2,17 @@
 // OpenCode sessions (Task 4's reviewer gate). A reviewer session receives
 // the completed attempt's evidence — objective, prior feedback, transcript,
 // the recorded diff artifact and any check results — and must conclude with
-// an explicit verdict: APPROVED or NOT_APPROVED plus a note. The note
+// an explicit verdict: APPROVED or CHANGES_REQUESTED plus a note. The note
 // becomes the gate feedback when the verdict is not approved, so the worker
-// knows exactly what to fix. Sessions are read-only: the reviewer may
-// inspect the worktree and run tests, but never modify files.
+// knows exactly what to fix. Sessions use the named reviewer agent with all
+// tools denied and evaluate only the supplied evidence.
 package ocxreviewer
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"corral/internal/adapter"
@@ -48,64 +46,34 @@ func (o Options) poll() time.Duration {
 	return o.PollInterval
 }
 
-// reviewTools keeps reviewer sessions read-only. The reviewer evaluates the
-// recorded diff, transcript, and check results included in its prompt; shell
-// access is disabled because it can mutate the attempt worktree.
-var reviewTools = map[string]bool{
-	"bash":        false,
-	"edit":        false,
-	"write":       false,
-	"apply_patch": false,
-	"websearch":   false,
-	"webfetch":    false,
-	"task":        false,
-	"todowrite":   false,
-	"question":    false,
-	"skill":       false,
-	"lsp":         false,
+const reviewerAgent = "corral-reviewer"
+
+// denyTools returns OpenCode's prompt-level wildcard deny. OpenCode converts
+// this entry into a wildcard permission rule, covering built-in, plugin, MCP,
+// and future tools without relying on the incomplete experimental ID list.
+func denyTools() map[string]bool {
+	return map[string]bool{"*": false}
 }
 
 // Driver implements verify.Reviewer for OpenCode sessions.
 type Driver struct {
 	oc   *ocx.Client
 	opts Options
-
-	mu      sync.Mutex
-	clients map[string]*ocx.Client // cwd -> client (worktrees)
 }
 
 func New(oc *ocx.Client, opts Options) *Driver {
-	return &Driver{
-		oc:      oc,
-		opts:    opts,
-		clients: map[string]*ocx.Client{},
-	}
-}
-
-// clientFor returns the client bound to a directory (the attempt's
-// worktree when isolated), creating it on first use.
-func (d *Driver) clientFor(cwd string) *ocx.Client {
-	if cwd == "" {
-		return d.oc
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if c, ok := d.clients[cwd]; ok {
-		return c
-	}
-	c := ocx.New(d.oc.Base(), cwd)
-	d.clients[cwd] = c
-	return c
+	return &Driver{oc: oc, opts: opts}
 }
 
 // Review runs a reviewer session for the attempt's evidence, waits for the
 // session to reach idle, and parses the verdict from the transcript.
 func (d *Driver) Review(ctx context.Context, req verify.ReviewRequest) (bool, string, error) {
-	cwd := req.Worktree
-	if cwd == "" {
-		cwd = req.Attempt.Cwd
-	}
-	client := d.clientFor(cwd)
+	// Reviewer agent configuration belongs to the daemon's main OpenCode
+	// project and is not guaranteed to exist in generated Git worktrees. The
+	// reviewer is evidence-only with all tools denied, so it does not need a
+	// session bound to the attempt worktree.
+	client := d.oc
+	reviewTools := denyTools()
 
 	title := "corral/review/" + req.Attempt.NodeID
 	sess, err := client.CreateSession(ctx, title)
@@ -113,7 +81,8 @@ func (d *Driver) Review(ctx context.Context, req verify.ReviewRequest) (bool, st
 		return false, "", fmt.Errorf("review session: %w", err)
 	}
 	prompt := promptFor(req)
-	if err := client.PromptAsyncWithTools(ctx, sess.ID, prompt, d.opts.Model, reviewTools); err != nil {
+	if err := client.PromptAsyncAgentWithTools(ctx, sess.ID, prompt, d.opts.Model, reviewerAgent, reviewTools); err != nil {
+		abortReview(client, sess.ID)
 		return false, "", fmt.Errorf("review prompt: %w", err)
 	}
 
@@ -122,6 +91,7 @@ func (d *Driver) Review(ctx context.Context, req verify.ReviewRequest) (bool, st
 	for {
 		select {
 		case <-ctx.Done():
+			abortReview(client, sess.ID)
 			return false, "", ctx.Err()
 		default:
 		}
@@ -140,16 +110,23 @@ func (d *Driver) Review(ctx context.Context, req verify.ReviewRequest) (bool, st
 		select {
 		case <-time.After(d.opts.poll()):
 		case <-ctx.Done():
+			abortReview(client, sess.ID)
 			return false, "", ctx.Err()
 		}
 	}
 
 	// Timed out: kill the session so it stops generating, and fail fast.
-	_ = client.Abort(ctx, sess.ID)
+	abortReview(client, sess.ID)
 	if lastPollErr != nil {
 		return false, "", fmt.Errorf("review timed out after %s (last poll: %v)", d.opts.timeout(), lastPollErr)
 	}
 	return false, "", fmt.Errorf("review timed out after %s (no terminal response)", d.opts.timeout())
+}
+
+func abortReview(client *ocx.Client, sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = client.Abort(ctx, sessionID)
 }
 
 // terminal reports whether the newest assistant message ended the session,
@@ -164,21 +141,30 @@ func terminal(msgs []ocx.Message) (bool, string) {
 			return true, errorName(m.Info.Error)
 		}
 		if m.Info.Finish != nil {
-			return true, ""
+			switch *m.Info.Finish {
+			case "", "tool-calls":
+				return false, ""
+			case "stop":
+				return true, ""
+			default:
+				return true, "finish reason: " + *m.Info.Finish
+			}
 		}
 		return false, ""
 	}
 	return false, ""
 }
 
-// verdict scans the transcript's assistant text (newest message first) for
-// an explicit APPROVED / NOT_APPROVED verdict and its note.
+// verdict parses only the newest assistant response. Text parts are joined in
+// their original order because OpenCode may split one continuous response
+// across parts; older assistant messages can never supply a stale verdict.
 func verdict(msgs []ocx.Message) (bool, string, error) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		if m.Info.Role != "assistant" {
 			continue
 		}
+		var text strings.Builder
 		for _, part := range m.Parts {
 			var p struct {
 				Type string `json:"type"`
@@ -187,34 +173,43 @@ func verdict(msgs []ocx.Message) (bool, string, error) {
 			if json.Unmarshal(part, &p) != nil || p.Type != "text" {
 				continue
 			}
-			if approved, note, ok := parseVerdict(p.Text); ok {
-				return approved, note, nil
-			}
+			text.WriteString(p.Text)
 		}
+		if approved, note, ok := parseVerdict(text.String()); ok {
+			return approved, note, nil
+		}
+		return false, "", fmt.Errorf("reviewer produced no explicit verdict")
 	}
 	return false, "", fmt.Errorf("reviewer produced no explicit verdict")
 }
 
-var verdictRe = regexp.MustCompile(`(?i)NOT[_ ]?APPROVED|APPROVED`)
-
-// parseVerdict extracts an APPROVED / NOT_APPROVED verdict and the note
-// that follows it from the model's reply. The note is the "Note: ..." text
-// after the verdict keyword, capped so it stays focused.
+// parseVerdict accepts exactly two lines: a case-sensitive verdict followed
+// by a non-empty "Note: ..." line. Rejecting surrounding prose, legacy
+// spellings, and extra lines prevents a verdict word inside commentary from
+// being mistaken for the reviewer's decision.
 func parseVerdict(text string) (approved bool, note string, ok bool) {
-	loc := verdictRe.FindStringIndex(text)
-	if loc == nil {
+	text = strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) != 2 {
 		return false, "", false
 	}
-	kw := strings.ToUpper(text[loc[0]:loc[1]])
-	approved = kw != "NOT_APPROVED" && kw != "NOT APPROVED"
-	rest := text[loc[1]:]
-	if idx := strings.Index(strings.ToLower(rest), "note:"); idx >= 0 {
-		note = strings.TrimSpace(rest[idx+len("note:"):])
-		if end := strings.Index(note, "\n\n"); end >= 0 {
-			note = strings.TrimSpace(note[:end])
-		}
-		note = truncate(note, 2000)
+	switch lines[0] {
+	case "APPROVED":
+		approved = true
+	case "CHANGES_REQUESTED":
+		approved = false
+	default:
+		return false, "", false
 	}
+	const notePrefix = "Note: "
+	if !strings.HasPrefix(lines[1], notePrefix) {
+		return false, "", false
+	}
+	note = strings.TrimSpace(strings.TrimPrefix(lines[1], notePrefix))
+	if note == "" {
+		return false, "", false
+	}
+	note = truncate(note, 2000)
 	return approved, note, true
 }
 
@@ -257,7 +252,7 @@ Note: <one-paragraph justification citing the evidence>
 
 or
 
-NOT_APPROVED
+CHANGES_REQUESTED
 Note: <what is missing or wrong; concrete, actionable feedback the worker can act on>
 `)
 	return b.String()

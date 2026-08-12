@@ -96,6 +96,25 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	hb := time.NewTicker(d.eventHeartbeatInterval())
 	defer hb.Stop()
+	flushDurable := func() (bool, error) {
+		events, err := d.st.EventsAfter(ctx, runID, last)
+		if err != nil {
+			return false, err
+		}
+		for _, ev := range events {
+			if ev.Seq <= last {
+				continue
+			}
+			if err := writeEventSSE(w, fl, ev); err != nil {
+				return false, err
+			}
+			last = ev.Seq
+			if terminalRunEvent(ev) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 
 	for {
 		select {
@@ -106,23 +125,18 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 			// The broker is a wake-up path, not the source of truth. Reading the
 			// durable log here preserves order even when concurrent commits notify
 			// out of order.
-			events, err := d.st.EventsAfter(ctx, runID, last)
-			if err != nil {
+			terminal, err := flushDurable()
+			if err != nil || terminal {
 				return // headers are committed; reconnect replays from last id
 			}
-			for _, ev := range events {
-				if ev.Seq <= last {
-					continue
-				}
-				if err := writeEventSSE(w, fl, ev); err != nil {
-					return
-				}
-				last = ev.Seq
-				if terminalRunEvent(ev) {
-					return
-				}
-			}
 		case <-hb.C:
+			// A best-effort store or broker wakeup may be dropped when buffers
+			// overflow. Heartbeats also reconcile the durable cursor so a quiet
+			// stream never waits forever for another event.
+			terminal, err := flushDurable()
+			if err != nil || terminal {
+				return
+			}
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return
 			}

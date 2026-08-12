@@ -47,7 +47,7 @@ flow is verified end-to-end against a real OpenCode server.
 - `example/opencode.json` — agent role configuration using OpenCode's
   per-agent permissions: orchestrator (deny edit/bash, allow corral_*),
   planner (read-only + corral_plan), worker (ask edits/bash), reviewer
-  (deny edit; bash allow only `git diff/status/log`, tests), merger (deny
+  (deny all tools; evaluates supplied evidence only), merger (deny
   edit; bash allow only `git status/log/diff`, ask merge/checkout/branch).
 
 ## Acceptance verification
@@ -64,7 +64,8 @@ flow is verified end-to-end against a real OpenCode server.
 - Planner smoke is tolerant: if the model fails to emit a parseable graph
   it logs and skips (nondeterministic LLM output); normalization keeps
   drift recoverable.
-- The plugin's role fallback is `operator` for unknown agents (human).
+- The plugin's role fallback is unprivileged `unknown`; operator authority is
+  reserved for non-model CLI/TUI clients.
 - `steer` sends a message into the running session (agent sees it as a
   follow-up instruction).
 - Run: `go test ./internal/daemon -v` (includes the real-OpenCode E2E).

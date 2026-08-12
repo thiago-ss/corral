@@ -18,8 +18,14 @@ type EventHandler func(Event)
 var streamClient = &http.Client{}
 
 func (c *Client) StreamEvents(ctx context.Context, handler EventHandler) error {
+	return c.StreamEventsReady(ctx, nil, handler)
+}
+
+// StreamEventsReady is StreamEvents with a callback invoked after each
+// successful HTTP subscription, before any event records are read.
+func (c *Client) StreamEventsReady(ctx context.Context, ready func(), handler EventHandler) error {
 	for {
-		err := c.streamOnce(ctx, handler)
+		err := c.streamOnce(ctx, ready, handler)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -34,7 +40,7 @@ func (c *Client) StreamEvents(ctx context.Context, handler EventHandler) error {
 	}
 }
 
-func (c *Client) streamOnce(ctx context.Context, handler EventHandler) error {
+func (c *Client) streamOnce(ctx context.Context, ready func(), handler EventHandler) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/global/event", nil)
 	if err != nil {
 		return err
@@ -48,6 +54,9 @@ func (c *Client) streamOnce(ctx context.Context, handler EventHandler) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("event stream: %s", resp.Status)
+	}
+	if ready != nil {
+		ready()
 	}
 	br := bufio.NewReader(resp.Body)
 	for {

@@ -7,8 +7,11 @@ Status: **DONE** — all acceptance criteria covered with tests.
 - **Permission requests → explicit blocked state**
   - `adapter.PermissionSession` (optional interface): `PendingPermission`,
     `RespondPermission`.
-  - `ocxadapter` tracks `permission.updated` events per session and answers
-    via `POST /session/:id/permissions/:permissionID`.
+  - `ocxadapter` tracks `permission.asked` / `permission.v2.asked`; one shared,
+    bounded background poll queries durable `GET /permission` across SSE
+    reconnect gaps, keeping scheduler `PendingPermission` checks local and
+    non-blocking. Answers use `POST /permission/:requestID/reply`
+    (`once` / `reject`).
   - Scheduler: a pending permission moves the node `running → blocked`
     (payload carries `permissionID`) and the session is *suspended* — its
     eventual completion still resolves the attempt (machine walk

@@ -33,6 +33,12 @@ func TestEmbeddedContentValid(t *testing.T) {
 	if !contains(OpenCodeConfigJSON, `"corral-orchestrator"`) || !contains(OpenCodeConfigJSON, `"corral-planner"`) {
 		t.Error("embedded config missing agents")
 	}
+	if !contains(CorralPluginTS, `"graph" in parsed`) || !contains(CorralPluginTS, `(parsed as { graph: unknown }).graph`) {
+		t.Error("embedded start tool does not unwrap full corral_plan output")
+	}
+	if contains(CorralPluginTS, `return "operator"`) || contains(CorralPluginTS, `role ?? "operator"`) {
+		t.Error("embedded plugin lets unknown model agents mint operator authority")
+	}
 }
 
 func contains(s, sub string) bool {

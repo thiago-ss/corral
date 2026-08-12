@@ -122,9 +122,23 @@ func (m *Manager) CommitWorktree(ctx context.Context, worktree string) error {
 	if _, err := m.git(ctx, worktree, "add", "-A"); err != nil {
 		return err
 	}
-	if _, err := m.git(ctx, worktree, "-c", "user.name=corral", "-c", "user.email=corral@local", "commit", "-q", "-m", "corral: work"); err != nil {
-		// Nothing to commit is fine.
+	// Determine the no-op case explicitly. A non-zero commit can also mean
+	// a hook, signer, or filesystem failure; those errors must reach the
+	// caller so the staged work can be retried.
+	out, code, err := m.gitExit(ctx, worktree, "diff", "--cached", "--quiet", "--exit-code", "HEAD", "--")
+	if err != nil {
+		return err
+	}
+	switch code {
+	case 0:
 		return nil
+	case 1:
+		// Staged changes exist; commit them below.
+	default:
+		return fmt.Errorf("inspect staged work: git diff exited %d: %s", code, tail([]byte(out), 400))
+	}
+	if _, err := m.git(ctx, worktree, "-c", "user.name=corral", "-c", "user.email=corral@local", "commit", "-q", "-m", "corral: work"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -140,13 +154,35 @@ func (m *Manager) MergeBranch(ctx context.Context, branch string) error {
 	if _, err := m.git(ctx, m.repo, "checkout", "-q", main); err != nil {
 		return err
 	}
-	out, err := m.git(ctx, m.repo,
+	_, err = m.git(ctx, m.repo,
 		"-c", "user.name=corral", "-c", "user.email=corral@local",
 		"merge", "--no-ff", "-m", "corral: merge "+branch, branch)
 	if err != nil {
-		return fmt.Errorf("merge %s: %w: %s", branch, err, tail([]byte(out), 400))
+		mergeErr := fmt.Errorf("merge %s: %w", branch, err)
+		if abortErr := m.abortMerge(); abortErr != nil {
+			return fmt.Errorf("%w; abort failed: %v", mergeErr, abortErr)
+		}
+		return mergeErr
 	}
 	return nil
+}
+
+// abortMerge restores the main checkout after a merge that entered merge
+// state and then failed (for example, a conflict or merge-commit hook).
+// Cleanup uses its own bounded context so caller cancellation cannot strand
+// the repository in an active merge.
+func (m *Manager) abortMerge() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, code, err := m.gitExit(ctx, m.repo, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return nil
+	}
+	_, err = m.git(ctx, m.repo, "merge", "--abort")
+	return err
 }
 
 // MainBranch returns the currently checked-out branch of the main repo.
@@ -162,14 +198,21 @@ func (m *Manager) MainBranch(ctx context.Context) (string, error) {
 	return b, nil
 }
 
-// Remove deletes a worktree. Failed worktrees are kept for inspection by
-// design; callers invoke Remove only after successful merge/cleanup.
+// Remove deletes a clean worktree. Any tracked, untracked, or ignored content
+// keeps the worktree for inspection, even after its branch was merged.
 func (m *Manager) Remove(ctx context.Context, branch string) error {
 	path := filepath.Join(m.dir, branch)
 	if _, err := os.Stat(path); err != nil {
 		return nil // already gone
 	}
-	if _, err := m.git(ctx, m.repo, "worktree", "remove", "--force", path); err != nil {
+	status, err := m.git(ctx, path, "status", "--porcelain=v1", "--untracked-files=normal", "--ignored=matching")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("refuse to remove dirty worktree %s", path)
+	}
+	if _, err := m.git(ctx, m.repo, "worktree", "remove", path); err != nil {
 		return err
 	}
 	_, _ = m.git(ctx, m.repo, "branch", "-D", branch)
@@ -185,7 +228,7 @@ type WorktreeInfo struct {
 	Locked   bool
 	Detached bool
 	Orphaned bool // admin entry whose working directory is already gone
-	Dirty    bool // tracked, staged, or untracked work not recorded in HEAD
+	Dirty    bool // tracked, staged, untracked, or ignored content not recorded in HEAD
 }
 
 // List returns the attempt worktrees registered under the manager's
@@ -204,7 +247,9 @@ func (m *Manager) List(ctx context.Context) ([]WorktreeInfo, error) {
 			continue
 		}
 		info.Mtime = lastActivity(info.Path)
-		status, err := m.git(ctx, info.Path, "status", "--porcelain=v1", "--untracked-files=normal", "--ignored=no")
+		// Ignored files still carry user data. Treat them as dirty so automatic
+		// pruning never deletes content merely because .gitignore hides it.
+		status, err := m.git(ctx, info.Path, "status", "--porcelain=v1", "--untracked-files=normal", "--ignored=matching")
 		if err != nil {
 			return nil, err
 		}
@@ -226,7 +271,7 @@ func parseWorktreeBlock(block string) (WorktreeInfo, bool) {
 			info.Branch = strings.TrimPrefix(line, "branch refs/heads/")
 		case line == "detached":
 			info.Detached = true
-		case line == "locked":
+		case line == "locked" || strings.HasPrefix(line, "locked "):
 			info.Locked = true
 		case strings.HasPrefix(line, "prunable"):
 			info.Orphaned = true
@@ -357,7 +402,9 @@ func (m *Manager) Prune(ctx context.Context, staleAfter time.Duration, now time.
 // removeInfo removes a worktree by path. A merged branch is deleted too;
 // an unmerged stale branch is kept so its commits stay recoverable.
 func (m *Manager) removeInfo(ctx context.Context, info WorktreeInfo, merged bool) error {
-	if _, err := m.git(ctx, m.repo, "worktree", "remove", "--force", info.Path); err != nil {
+	// No --force here: if content appears after List's safety check, Git must
+	// refuse instead of deleting an agent's newly-written work.
+	if _, err := m.git(ctx, m.repo, "worktree", "remove", info.Path); err != nil {
 		return err
 	}
 	if merged && info.Branch != "" {

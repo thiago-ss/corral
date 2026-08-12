@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +98,216 @@ func TestManagerLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("worktree not removed")
+	}
+}
+
+func TestRemovePreservesIgnoredContent(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("secret.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "add", ".gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore"); err != nil {
+		t.Fatal(err)
+	}
+	branch := "corral/r1/w1/1"
+	path, err := m.Add(ctx, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(path, "secret.env")
+	if err := os.WriteFile(secret, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Remove(ctx, branch); err == nil || !strings.Contains(err.Error(), "dirty worktree") {
+		t.Fatalf("Remove ignored-content error = %v", err)
+	}
+	if got, err := os.ReadFile(secret); err != nil || string(got) != "keep me" {
+		t.Fatalf("ignored content lost: %q, %v", got, err)
+	}
+}
+
+func TestCommitWorktreePropagatesCommitFailureAndCanRetry(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.CommitWorktree(ctx, path); err == nil {
+		t.Fatal("CommitWorktree hid a real git commit failure")
+	}
+	status, err := m.git(ctx, path, "status", "--porcelain=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "A  a.txt\n" {
+		t.Fatalf("failed commit did not preserve staged work: %q", status)
+	}
+	mainStatus, err := m.git(ctx, repo, "status", "--porcelain=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mainStatus != "" {
+		t.Fatalf("failed worktree commit dirtied main: %q", mainStatus)
+	}
+
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
+		t.Fatalf("retry commit: %v", err)
+	}
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatalf("merge after retry: %v", err)
+	}
+}
+
+func TestCommitWorktreeAllowsNothingToCommit(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
+		t.Fatalf("empty commit: %v", err)
+	}
+}
+
+func TestMergeBranchAbortsConflictAndCanRetry(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	if err := os.WriteFile(filepath.Join(repo, "conflict.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "add", "conflict.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "conflict.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "conflict.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "add", "conflict.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main change"); err != nil {
+		t.Fatal(err)
+	}
+	mainHead, err := m.git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err == nil {
+		t.Fatal("conflicting merge unexpectedly succeeded")
+	}
+	assertCleanMainWithoutMerge(t, m, ctx, mainHead)
+
+	// Fold main into the worktree branch, making a retry conflict-free.
+	if _, err := m.git(ctx, path,
+		"-c", "user.name=t", "-c", "user.email=t@t",
+		"merge", "-q", "-s", "ours", "-m", "resolve main", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatalf("merge retry: %v", err)
+	}
+}
+
+func TestMergeBranchAbortsFailedMergeCommitAndCanRetry(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(repo, ".git", "hooks", "pre-merge-commit")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainHead, err := m.git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err == nil {
+		t.Fatal("merge commit hook failure was hidden")
+	}
+	assertCleanMainWithoutMerge(t, m, ctx, mainHead)
+
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatalf("merge retry: %v", err)
+	}
+}
+
+func assertCleanMainWithoutMerge(t *testing.T, m *Manager, ctx context.Context, wantHead string) {
+	t.Helper()
+	if _, code, err := m.gitExit(ctx, m.repo, "rev-parse", "--verify", "--quiet", "MERGE_HEAD"); err != nil {
+		t.Fatal(err)
+	} else if code == 0 {
+		t.Fatal("failed merge left MERGE_HEAD active")
+	}
+	status, err := m.git(ctx, m.repo, "status", "--porcelain=v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "" {
+		t.Fatalf("failed merge left main dirty: %q", status)
+	}
+	head, err := m.git(ctx, m.repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != wantHead {
+		t.Fatalf("failed merge moved main HEAD: got %q want %q", head, wantHead)
 	}
 }
 
@@ -306,6 +517,40 @@ func TestManagerPruneSkipsDirtyStale(t *testing.T) {
 	}
 }
 
+func TestManagerPruneSkipsIgnoredContent(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("secret.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "add", ".gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.git(ctx, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore secret"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(path, "secret.env")
+	if err := os.WriteFile(secret, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := m.Prune(ctx, time.Hour, time.Now().Add(30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("worktree with ignored content pruned: %v", pruned)
+	}
+	if got, err := os.ReadFile(secret); err != nil || string(got) != "keep me" {
+		t.Fatalf("ignored content lost: %q, %v", got, err)
+	}
+}
+
 func TestManagerPruneSkipsLocked(t *testing.T) {
 	repo := t.TempDir()
 	gitInit(t, repo)
@@ -319,7 +564,7 @@ func TestManagerPruneSkipsLocked(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.git(ctx, m.repo, "worktree", "lock", path); err != nil {
+	if _, err := m.git(ctx, m.repo, "worktree", "lock", "--reason", "active run", path); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.CommitWorktree(ctx, path); err != nil {

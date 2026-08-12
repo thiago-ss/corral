@@ -103,7 +103,14 @@ func (c *Client) promptAsync(ctx context.Context, sid, text, model, agent string
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	if model != "" {
-		body["model"] = model
+		providerID, modelID, ok := strings.Cut(model, "/")
+		if !ok || strings.TrimSpace(providerID) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("model %q must use provider/model format", model)
+		}
+		body["model"] = map[string]string{
+			"providerID": providerID,
+			"modelID":    modelID,
+		}
 	}
 	if agent != "" {
 		body["agent"] = agent
@@ -142,10 +149,21 @@ func (c *Client) Abort(ctx context.Context, sid string) error {
 	return err
 }
 
-// RespondPermission answers a pending permission request.
-func (c *Client) RespondPermission(ctx context.Context, sid, permissionID, response string) error {
-	_, err := c.do(ctx, http.MethodPost, "/session/"+sid+"/permissions/"+permissionID,
-		url.Values{"directory": {c.dir}}, map[string]any{"response": response}, nil)
+// PendingPermissions returns every unresolved permission request visible in
+// this client's directory. Unlike the event stream, this endpoint can
+// reconcile requests created during a disconnect.
+func (c *Client) PendingPermissions(ctx context.Context) ([]PermissionRequest, error) {
+	var requests []PermissionRequest
+	_, err := c.do(ctx, http.MethodGet, "/permission",
+		url.Values{"directory": {c.dir}}, nil, &requests)
+	return requests, err
+}
+
+// RespondPermission answers a pending permission request using OpenCode's
+// current permission API. reply is one of "once", "always", or "reject".
+func (c *Client) RespondPermission(ctx context.Context, permissionID, reply string) error {
+	_, err := c.do(ctx, http.MethodPost, "/permission/"+permissionID+"/reply",
+		url.Values{"directory": {c.dir}}, map[string]any{"reply": reply}, nil)
 	return err
 }
 

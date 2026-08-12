@@ -8,26 +8,35 @@ sessions; integration test covers parallel execution and cancellation.
 - `internal/ocxadapter` — `Driver` implementing `adapter.Driver` +
   `adapter.Stepper`:
   - `Start`: `POST /session` (title `corral/<node>`), async prompt with the
-    node objective (+ role prefix, optional model override), records the
-    OpenCode session; returns an `adapter.Session` handle.
+    node objective (+ role prefix). A per-attempt `provider/model` overrides
+    the driver default; records the OpenCode session and returns an
+    `adapter.Session` handle.
   - Completion detection: a shared `/global/event` SSE stream (opened once
     per driver) dispatches `session.idle` / `session.error` to the owning
     attempt's event channel; a per-attempt poller (`PollInterval`, default
-    1s) queries `/session/status` + `/session/:id/message` as the
-    reconciliation fallback when events are missed or the stream drops.
+    1s) queries `/session/:id/message` as the reconciliation fallback when
+    terminal events are missed or the stream drops. The first start waits at
+    most `StreamReadyTimeout` (default 1s) for SSE, then proceeds through REST
+    fallback instead of hanging when `/global/event` is unavailable.
   - Exactly-once completion: `attempt.completed` guard (checked before the
     transcript fetch and again under the driver mutex before emission);
     duplicate events (e.g. repeated `session.idle`) cannot emit twice, and
     the scheduler asserts exactly one attempt row per node.
   - Terminal classification from the transcript: aborted flag or
     `MessageAbortedError` → `StatusAborted`; other assistant error →
-    `StatusError`; `finish:"stop"` → `StatusIdle`; no finished message →
-    still running (poll again).
+    `StatusError`; `finish:"stop"` → `StatusIdle`; `finish:"tool-calls"` →
+    still running; any other non-empty finish reason → `StatusError`.
   - `Abort` → `POST /session/:id/abort`; `Messages` → adapter messages
     with text parts, costs/tokens, and user-summary diffs (patch format).
+  - Permission requests use `permission.asked` / `permission.v2.asked` for
+    low-latency notification plus one shared, bounded background
+    `GET /permission` reconciler; scheduler permission checks remain local and
+    non-blocking. Decisions use `POST /permission/:requestID/reply` with
+    `once` / `reject`.
 - Contract additions (adapter v0.2): `adapter.Completion`,
   `adapter.Stepper`, `Session.ServerID()`.
-- `sched`: drains `adapter.Stepper` into the results channel; records
+- `sched`: drains the shared `adapter.Stepper` through a central owner router
+  so concurrent runs receive only their own completions; records
   `ServerID` per attempt (`store.Attempt.ServerID`, new `server_id`
   column); new `RunHandle.CancelNode` (operator cancel → driver abort →
   `running → canceled`).
@@ -52,8 +61,8 @@ sessions; integration test covers parallel execution and cancellation.
 |---|---|
 | Start, stream, message, inspect, cancel sessions | Integration test: sessions created + prompted; SSE stream dispatches terminal events; transcripts fetched via `Messages`; `CancelNode` aborts mid-run |
 | Record OpenCode server/session IDs per attempt | Asserted: `session_id` has `ses_` prefix, `server_id` == server base URL |
-| Event stream + status polling fallback | Both paths implemented; polling is the completion path when events are dropped (same `maybeComplete` logic) |
-| Duplicate/missing events cannot duplicate completion | Exactly 1 attempt row per node asserted; `completed` guard + scheduler drop of unknown/duplicate attempt results |
+| Event stream + REST fallback | Startup is bounded when SSE is unavailable; transcript polling completes attempts, and durable permission polling recovers prompts missed during reconnects |
+| Duplicate/missing events cannot duplicate completion | Exactly 1 attempt row per node asserted; `completed` guard + scheduler owner routing retains start-race completions until registration |
 | Two-node parallel run + cancellation test | Both sessions observed busy concurrently (peak ≥ 2); w1 done with real file output; w2 canceled with `aborted` attempt |
 | Claude protocol and permission mediation | Protocol fixtures cover init/result/usage, large and high-volume streams, duplicate terminal events, scoped MCP decisions, aborts, and closed-driver behavior; race and cross-build checks cover the package |
 

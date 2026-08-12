@@ -113,11 +113,26 @@ func (d *Driver) startBroker() error {
 			}
 			path = filepath.Join(dir, "broker.sock")
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if info, err := os.Lstat(path); err == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				if dir != "" {
+					_ = os.Remove(dir)
+				}
+				d.brokerErr = fmt.Errorf("refusing to replace non-socket permission path %q", path)
+				return
+			}
+			if err := os.Remove(path); err != nil {
+				if dir != "" {
+					_ = os.Remove(dir)
+				}
+				d.brokerErr = fmt.Errorf("remove stale socket: %w", err)
+				return
+			}
+		} else if !os.IsNotExist(err) {
 			if dir != "" {
 				_ = os.Remove(dir)
 			}
-			d.brokerErr = fmt.Errorf("remove stale socket: %w", err)
+			d.brokerErr = fmt.Errorf("inspect permission socket: %w", err)
 			return
 		}
 		ln, err := net.Listen("unix", path)

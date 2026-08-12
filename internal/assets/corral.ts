@@ -18,7 +18,8 @@ async function loadKey(): Promise<string> {
 }
 
 // Map the current OpenCode agent to a corral role for server-side
-// enforcement. Anything unknown falls back to operator (human).
+// enforcement. Unknown agents stay unprivileged; only non-model clients such
+// as the CLI/TUI may claim the operator role directly.
 const ROLE_MAP: Record<string, string> = {
   "corral-orchestrator": "orchestrator",
   "corral-planner": "planner",
@@ -29,7 +30,7 @@ const ROLE_MAP: Record<string, string> = {
 
 function roleFor(agent?: string): string {
   if (agent && agent in ROLE_MAP) return ROLE_MAP[agent]
-  return "operator"
+  return "unknown"
 }
 
 async function call(path: string, body?: unknown, role?: string) {
@@ -40,7 +41,7 @@ async function call(path: string, body?: unknown, role?: string) {
       method: body === undefined ? "GET" : "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Corral-Role": role ?? "operator",
+        "X-Corral-Role": role ?? "unknown",
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -72,12 +73,16 @@ export const start = tool({
     autoApproveGates: tool.schema.boolean().optional().describe("When true, the run is pre-authorized: the orchestrator approves human gates itself as they are reached, without waiting for the operator"),
   },
   async execute(args, context) {
-    let graph: unknown
+    let parsed: unknown
     try {
-      graph = JSON.parse(args.graph)
+      parsed = JSON.parse(args.graph)
     } catch {
       return "error: graph is not valid JSON"
     }
+    const graph =
+      typeof parsed === "object" && parsed !== null && "graph" in parsed
+        ? (parsed as { graph: unknown }).graph
+        : parsed
     const body: Record<string, unknown> = { graph }
     if (args.autoApproveGates !== undefined) body.autoApproveGates = args.autoApproveGates
     return call("/api/runs", body, roleFor(context.agent))

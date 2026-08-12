@@ -18,8 +18,8 @@ replay reproduces graph state, crash/restart test passes.
     `ClearLease` is for crash recovery.
 - `internal/sched` — the control loop:
   - One deterministic `Step()` per tick; all state mutation happens inside
-    it (cooperative simulation with the fake driver, async results channel
-    for real drivers).
+    it (cooperative simulation with the fake driver; real-driver completions
+    are drained and routed centrally by the scheduler).
   - Concurrency limit, priority ordering with **aging** (boost per
     saturated step, capped; only waiting nodes accrue).
   - Retry policy: `verifying → retry_wait → ready` on failed evidence while

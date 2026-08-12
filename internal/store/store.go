@@ -651,6 +651,63 @@ func Redact(s string) string {
 	if s == "" {
 		return s
 	}
+	if json.Valid([]byte(s)) {
+		var value any
+		decoder := json.NewDecoder(strings.NewReader(s))
+		decoder.UseNumber()
+		if decoder.Decode(&value) == nil {
+			value = redactJSON(value)
+			if out, err := json.Marshal(value); err == nil {
+				return string(out)
+			}
+		}
+	}
+	return redactText(s)
+}
+
+func redactJSON(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if secretKey(key) {
+				value[key] = "[REDACTED]"
+				continue
+			}
+			value[key] = redactJSON(item)
+		}
+	case []any:
+		for i, item := range value {
+			value[i] = redactJSON(item)
+		}
+	case string:
+		return redactText(value)
+	}
+	return value
+}
+
+func secretKey(key string) bool {
+	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+	for _, marker := range []string{"apikey", "password", "passwd", "secret", "authorization", "privatekey", "accesskey"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	// Token accounting fields are telemetry, not credentials. Other token
+	// keys (accessToken, refreshToken, tokenValue, etc.) are secrets.
+	accounting := map[string]bool{
+		"tokens": true, "tokencount": true, "maxtokens": true,
+		"prompttokens": true, "completiontokens": true, "totaltokens": true,
+		"inputtokens": true, "outputtokens": true, "reasoningtokens": true,
+		"cachedtokens": true, "cachecreationtokens": true,
+		"cachereadtokens": true, "cachewritetokens": true,
+	}
+	if strings.Contains(key, "token") && !accounting[key] {
+		return true
+	}
+	return false
+}
+
+func redactText(s string) string {
 	repl := []struct{ re, to string }{
 		{`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`, "bearer [REDACTED]"},
 		{`(?i)api[_-]?key["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{6,}`, "apiKey [REDACTED]"},

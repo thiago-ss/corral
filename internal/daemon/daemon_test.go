@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,6 +150,89 @@ func TestRoleEnforcement(t *testing.T) {
 	// Unknown role rejected (health is open, everything else is gated).
 	if code, _ := a.do("hacker", http.MethodPost, "/api/runs", map[string]any{"graph": &graph.Graph{}}); code != http.StatusForbidden {
 		t.Fatalf("unknown role: %d, want 403", code)
+	}
+}
+
+func TestConcurrentWatchAndCreate(t *testing.T) {
+	a, _, _, _ := setupDaemon(t, "")
+	g := &graph.Graph{Nodes: []*graph.Node{gateNode("gate")}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create seed run: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 16)
+	request := func(method, path string, body any) error {
+		var rdr io.Reader
+		if body != nil {
+			data, err := json.Marshal(body)
+			if err != nil {
+				return err
+			}
+			rdr = bytes.NewReader(data)
+		}
+		req, err := http.NewRequest(method, a.base+path, rdr)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Corral-Role", "operator")
+		resp, err := a.cli.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= http.StatusBadRequest {
+			return fmt.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, respBody)
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		created := 0
+		for attempts := 0; attempts < 1000 && created < 50; attempts++ {
+			if err := request(http.MethodPost, "/api/runs", map[string]any{"graph": g}); err != nil {
+				if strings.Contains(err.Error(), "SQLITE_BUSY") {
+					time.Sleep(time.Millisecond)
+					continue
+				}
+				errs <- err
+				return
+			}
+			created++
+		}
+		if created < 50 {
+			errs <- fmt.Errorf("created %d concurrent runs, want 50", created)
+		}
+	}()
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 200 {
+				if err := request(http.MethodGet, "/api/runs/"+created.RunID+"/watch?since=0&timeout=1", nil); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
@@ -357,6 +442,53 @@ func TestPreAuthorizedGateThroughAPI(t *testing.T) {
 	})
 	if snap["status"] != "completed" {
 		t.Fatalf("run status = %v, want completed", snap["status"])
+	}
+}
+
+func TestOrchestratorGateActionsRequirePersistedPreAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   graph.State
+	}{
+		{action: "approve", want: graph.StateDone},
+		{action: "reject", want: graph.StateBlocked},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			a, _, st, _ := setupDaemon(t, "")
+			g := &graph.Graph{Nodes: []*graph.Node{gateNode("gate")}}
+			code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{
+				"graph":            g,
+				"autoApproveGates": false,
+			})
+			if code != http.StatusCreated {
+				t.Fatalf("create: %d %s", code, body)
+			}
+			var created struct{ RunID string }
+			if err := json.Unmarshal([]byte(body), &created); err != nil {
+				t.Fatal(err)
+			}
+			a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 30*time.Second)
+
+			ru, err := st.Run(context.Background(), created.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ru.AutoApproveGates {
+				t.Fatal("run unexpectedly persisted with autoApproveGates=true")
+			}
+
+			code, body = a.do("orchestrator", http.MethodPost, "/api/runs/"+created.RunID+"/"+tc.action, map[string]any{"nodeID": "gate"})
+			if code != http.StatusForbidden {
+				t.Fatalf("non-pre-authorized orchestrator %s: %d %s, want 403", tc.action, code, body)
+			}
+			a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 5*time.Second)
+
+			code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/"+tc.action, map[string]any{"nodeID": "gate"})
+			if code != http.StatusOK {
+				t.Fatalf("operator %s: %d %s", tc.action, code, body)
+			}
+			a.waitState(t, "", created.RunID, "gate", tc.want, 30*time.Second)
+		})
 	}
 }
 
