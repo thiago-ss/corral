@@ -94,6 +94,38 @@ func TestEventSubscriptionsPublishAfterCommitToMultipleObservers(t *testing.T) {
 	}
 }
 
+func TestSlowEventSubscriberRecoversAfterDroppedWakeup(t *testing.T) {
+	st := open(t)
+	events, unsubscribe := st.SubscribeEvents()
+	defer unsubscribe()
+
+	// Fill the best-effort wakeup queue, then overflow it once. Overflow may
+	// drop that wakeup, but must not permanently detach the subscriber: its
+	// consumer can reconcile from the durable log and keep listening.
+	for i := 1; i <= eventSubscriberBuffer+1; i++ {
+		st.publish(Event{Seq: int64(i), RunID: "r1", Type: EventGraph})
+	}
+	for i := 0; i < eventSubscriberBuffer; i++ {
+		if _, ok := <-events; !ok {
+			t.Fatal("slow subscriber was permanently closed on overflow")
+		}
+	}
+
+	const marker = int64(10_000)
+	st.publish(Event{Seq: marker, RunID: "r1", Type: EventGraph})
+	select {
+	case event, ok := <-events:
+		if !ok {
+			t.Fatal("subscriber remained closed after catching up")
+		}
+		if event.Seq != marker {
+			t.Fatalf("event seq = %d, want %d", event.Seq, marker)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscriber did not receive events after catching up")
+	}
+}
+
 func TestEventsAfterUsesExclusiveCursor(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()

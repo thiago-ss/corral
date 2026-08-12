@@ -92,13 +92,13 @@ type eventSubscriber struct {
 }
 
 // eventSubscriberBuffer decouples durable writes from live observers. A
-// subscriber that cannot keep up is closed; it can replay the gap from the
-// durable log using its last sequence number.
+// subscriber that cannot keep up misses wakeups until it catches up, then
+// reconciles the gap from the durable log using its last sequence number.
 const eventSubscriberBuffer = 1024
 
 // SubscribeEvents observes events after their transactions commit. Delivery
 // is best effort and never blocks a store writer. The caller must unsubscribe;
-// a slow subscriber is removed and its channel is closed.
+// a slow subscriber stays attached so later wakeups resume after it catches up.
 func (s *Store) SubscribeEvents() (<-chan Event, func()) {
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
@@ -134,8 +134,8 @@ func (s *Store) publish(ev Event) {
 		select {
 		case sub.ch <- ev:
 		default:
-			delete(s.eventSubscribers, sub)
-			close(sub.ch)
+			// Notifications are wakeups, not the source of truth. Dropping one
+			// is safe; the next delivered wakeup triggers durable cursor replay.
 		}
 	}
 }
