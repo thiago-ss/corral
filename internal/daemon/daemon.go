@@ -54,8 +54,14 @@ type Daemon struct {
 	apiKey string
 	ctx    context.Context
 
-	mu   sync.Mutex
-	runs map[string]*sched.RunHandle
+	mu               sync.Mutex
+	runs             map[string]*sched.RunHandle
+	broker           *broker
+	eventHeartbeat   time.Duration
+	eventHeartbeatMu sync.RWMutex
+	eventUnsubscribe func()
+	eventPumpDone    chan struct{}
+	closeOnce        sync.Once
 }
 
 // Dir returns the project directory the daemon manages.
@@ -65,11 +71,36 @@ func (d *Daemon) Dir() string { return d.dir }
 func (d *Daemon) SetPlanner(p Planner) { d.plan = p }
 
 func New(st *store.Store, s *sched.Scheduler, plan Planner, dir, apiKey string) *Daemon {
-	return &Daemon{
+	events, unsubscribe := st.SubscribeEvents()
+	d := &Daemon{
 		st: st, sched: s, plan: plan, dir: dir, apiKey: apiKey,
-		ctx:  context.Background(),
-		runs: map[string]*sched.RunHandle{},
+		ctx:              context.Background(),
+		runs:             map[string]*sched.RunHandle{},
+		broker:           newBroker(),
+		eventHeartbeat:   defaultEventHeartbeat,
+		eventUnsubscribe: unsubscribe,
+		eventPumpDone:    make(chan struct{}),
 	}
+	go d.forwardEvents(events)
+	return d
+}
+
+func (d *Daemon) forwardEvents(events <-chan store.Event) {
+	defer close(d.eventPumpDone)
+	for ev := range events {
+		d.broker.Publish(ev)
+	}
+	d.broker.Close()
+}
+
+// Close detaches the daemon from the store and closes live event streams.
+// Other daemons subscribed to the same store are unaffected.
+func (d *Daemon) Close() {
+	d.closeOnce.Do(func() {
+		d.eventUnsubscribe()
+		d.broker.Close()
+		<-d.eventPumpDone
+	})
 }
 
 // SetContext replaces the daemon's background context (its lifetime).
@@ -115,6 +146,7 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/steer", d.role(RoleOperator, RoleOrchestrator)(d.handleSteer))
 	mux.HandleFunc("POST /api/runs/{id}/permission", d.role(RoleOperator, RoleOrchestrator)(d.handlePermission))
 	mux.HandleFunc("GET /api/runs/{id}/export", d.handleExport)
+	mux.HandleFunc("GET /api/runs/{id}/events", d.handleEvents)
 	mux.HandleFunc("GET /doc", d.handleOpenAPI)
 	return d.auth(mux)
 }

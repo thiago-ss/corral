@@ -67,6 +67,53 @@ func TestCreateRunAndReplay(t *testing.T) {
 	}
 }
 
+func TestEventSubscriptionsPublishAfterCommitToMultipleObservers(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	one, unsubscribeOne := st.SubscribeEvents()
+	defer unsubscribeOne()
+	two, unsubscribeTwo := st.SubscribeEvents()
+	defer unsubscribeTwo()
+
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
+		t.Fatal(err)
+	}
+	for i, events := range []<-chan Event{one, two} {
+		select {
+		case event := <-events:
+			if event.RunID != "r1" || event.Seq != 1 || event.Type != EventRun {
+				t.Fatalf("observer %d got %+v", i, event)
+			}
+			persisted, err := st.EventsAfter(ctx, "r1", 0)
+			if err != nil || len(persisted) != 1 || persisted[0].Seq != event.Seq {
+				t.Fatalf("observer %d notified before durable read: events=%+v err=%v", i, persisted, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("observer %d received no event", i)
+		}
+	}
+}
+
+func TestEventsAfterUsesExclusiveCursor(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := st.AppendEvent(ctx, "r1", "a", EventGraph, "", "", "", `{}`, now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := st.EventsAfter(ctx, "r1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Seq != 2 || events[1].Seq != 3 {
+		t.Fatalf("events after 1 = %+v", events)
+	}
+}
+
 func TestLeaseAtomicity(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()

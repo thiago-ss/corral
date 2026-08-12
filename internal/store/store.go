@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -27,6 +28,7 @@ const (
 	EventRetry      EventType = "retry"      // retry scheduled
 	EventRun        EventType = "run"        // run lifecycle (created/completed)
 	EventGraph      EventType = "graph"      // graph version change
+	EventSteer      EventType = "steer"      // operator steering message to a running attempt
 )
 
 type Event struct {
@@ -79,6 +81,63 @@ type NodeRow struct {
 
 type Store struct {
 	db *sql.DB
+
+	eventMu          sync.Mutex
+	eventSubscribers map[*eventSubscriber]struct{}
+	eventsClosed     bool
+}
+
+type eventSubscriber struct {
+	ch chan Event
+}
+
+// eventSubscriberBuffer decouples durable writes from live observers. A
+// subscriber that cannot keep up is closed; it can replay the gap from the
+// durable log using its last sequence number.
+const eventSubscriberBuffer = 1024
+
+// SubscribeEvents observes events after their transactions commit. Delivery
+// is best effort and never blocks a store writer. The caller must unsubscribe;
+// a slow subscriber is removed and its channel is closed.
+func (s *Store) SubscribeEvents() (<-chan Event, func()) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventsClosed {
+		ch := make(chan Event)
+		close(ch)
+		return ch, func() {}
+	}
+	sub := &eventSubscriber{ch: make(chan Event, eventSubscriberBuffer)}
+	s.eventSubscribers[sub] = struct{}{}
+	return sub.ch, func() { s.unsubscribeEvents(sub) }
+}
+
+func (s *Store) unsubscribeEvents(sub *eventSubscriber) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if _, ok := s.eventSubscribers[sub]; !ok {
+		return
+	}
+	delete(s.eventSubscribers, sub)
+	close(sub.ch)
+}
+
+// publish notifies every subscriber without waiting. Callers invoke it only
+// after the transaction containing ev has committed successfully.
+func (s *Store) publish(ev Event) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventsClosed {
+		return
+	}
+	for sub := range s.eventSubscribers {
+		select {
+		case sub.ch <- ev:
+		default:
+			delete(s.eventSubscribers, sub)
+			close(sub.ch)
+		}
+	}
 }
 
 func Open(path string) (*Store, error) {
@@ -111,10 +170,22 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, eventSubscribers: map[*eventSubscriber]struct{}{}}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	err := s.db.Close()
+	s.eventMu.Lock()
+	if !s.eventsClosed {
+		s.eventsClosed = true
+		for sub := range s.eventSubscribers {
+			close(sub.ch)
+		}
+		s.eventSubscribers = nil
+	}
+	s.eventMu.Unlock()
+	return err
+}
 
 func migrate(db *sql.DB) error {
 	schema := `
@@ -211,12 +282,15 @@ func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, aut
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events(run_id, seq, etype, payload, created_at) VALUES(?, 1, 'run', '{"status":"created"}', ?)`,
-		runID, now.UnixMilli()); err != nil {
+	ev, err := s.appendEventTx(ctx, tx, runID, 1, "", EventRun, "", "", "", "", `{"status":"created"}`, now)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publish(*ev)
+	return nil
 }
 
 func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
@@ -274,10 +348,15 @@ func (s *Store) CompleteRun(ctx context.Context, runID string, status string, no
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
 		return err
 	}
-	if _, err := appendEventTx(ctx, tx, runID, 0, "", EventRun, "", "", "", "", `{"status":"`+status+`"}`, now); err != nil {
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, "", EventRun, "", "", "", "", `{"status":"`+status+`"}`, now)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publish(*ev)
+	return nil
 }
 
 // AppendTransition records a state change and updates the materialized
@@ -288,7 +367,7 @@ func (s *Store) AppendTransition(ctx context.Context, runID string, nodeID strin
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, err := appendEventTx(ctx, tx, runID, 0, nodeID, EventTransition, string(from), string(to), "", "", payload, now)
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, nodeID, EventTransition, string(from), string(to), "", "", payload, now)
 	if err != nil {
 		return 0, err
 	}
@@ -297,7 +376,11 @@ func (s *Store) AppendTransition(ctx context.Context, runID string, nodeID strin
 		string(to), now.UnixMilli(), runID, nodeID); err != nil {
 		return 0, err
 	}
-	return seq, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.publish(*ev)
+	return ev.Seq, nil
 }
 
 func (s *Store) AppendEvent(ctx context.Context, runID, nodeID string, typ EventType, from, to graph.State, attemptID, payload string, now time.Time) (int64, error) {
@@ -306,38 +389,60 @@ func (s *Store) AppendEvent(ctx context.Context, runID, nodeID string, typ Event
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, err := appendEventTx(ctx, tx, runID, 0, nodeID, typ, string(from), string(to), attemptID, "", payload, now)
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, nodeID, typ, string(from), string(to), attemptID, "", payload, now)
 	if err != nil {
 		return 0, err
 	}
-	return seq, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.publish(*ev)
+	return ev.Seq, nil
 }
 
-// appendEventTx computes the next per-run sequence and inserts the event.
-func appendEventTx(ctx context.Context, tx *sql.Tx, runID string, forceSeq int64, nodeID string, typ EventType, from, to, attemptID, _, payload string, now time.Time) (int64, error) {
+// appendEventTx computes the next per-run sequence, inserts the event and
+// returns the fully populated event for the caller to publish after commit.
+func (s *Store) appendEventTx(ctx context.Context, tx *sql.Tx, runID string, forceSeq int64, nodeID string, typ EventType, from, to, attemptID, _, payload string, now time.Time) (*Event, error) {
 	var seq int64
 	if forceSeq > 0 {
 		seq = forceSeq
 	} else {
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?`, runID).Scan(&seq); err != nil {
-			return 0, err
+			return nil, err
 		}
 	}
+	redacted := Redact(payload)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO events(run_id, seq, node_id, etype, from_state, to_state, attempt_id, payload, created_at)
 		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		runID, seq, nodeID, string(typ), from, to, attemptID, Redact(payload), now.UnixMilli()); err != nil {
-		return 0, err
+		runID, seq, nodeID, string(typ), from, to, attemptID, redacted, now.UnixMilli()); err != nil {
+		return nil, err
 	}
-	return seq, nil
+	return &Event{
+		Seq:       seq,
+		RunID:     runID,
+		NodeID:    nodeID,
+		Type:      typ,
+		From:      graph.State(from),
+		To:        graph.State(to),
+		AttemptID: attemptID,
+		Payload:   json.RawMessage(redacted),
+		CreatedAt: now.UnixMilli(),
+	}, nil
 }
 
 // Events returns the full event log of a run in sequence order.
 func (s *Store) Events(ctx context.Context, runID string) ([]Event, error) {
+	return s.EventsAfter(ctx, runID, 0)
+}
+
+// EventsAfter returns the events of a run with seq greater than after, in
+// sequence order. It backs both replay and the live-event SSE cursor.
+func (s *Store) EventsAfter(ctx context.Context, runID string, after int64) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT seq, node_id, etype, from_state, to_state, attempt_id, payload, created_at
-		 FROM events WHERE run_id = ? ORDER BY seq`, runID)
+		 FROM events WHERE run_id = ? AND seq > ? ORDER BY seq`, runID, after)
 	if err != nil {
 		return nil, err
 	}

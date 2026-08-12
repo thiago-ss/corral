@@ -32,6 +32,7 @@ func TestClientAgainstDaemon(t *testing.T) {
 	eng := verify.New(workdir)
 	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{Concurrency: 2})
 	d := daemon.New(st, s, nil, t.TempDir(), "")
+	t.Cleanup(d.Close)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d.SetContext(ctx)

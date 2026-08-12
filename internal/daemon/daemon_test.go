@@ -78,6 +78,7 @@ func setupDaemon(t *testing.T, apiKey string) (*api, *daemon.Daemon, *store.Stor
 		Concurrency: 4, Worktrees: wtm,
 	})
 	d := daemon.New(st, s, nil, repo, apiKey)
+	t.Cleanup(d.Close)
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 	return &api{t: t, cli: srv.Client(), base: srv.URL}, d, st, drv
@@ -259,6 +260,20 @@ func TestCancelAndRetryThroughAPI(t *testing.T) {
 	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/steer", map[string]any{"nodeID": "w1", "message": "wrap up"})
 	if code != http.StatusOK {
 		t.Fatalf("steer: %d %s", code, body)
+	}
+	events, err := st.Events(context.Background(), created.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var steer *store.Event
+	for i := range events {
+		if events[i].Type == store.EventSteer {
+			steer = &events[i]
+			break
+		}
+	}
+	if steer == nil || steer.NodeID != "w1" || !strings.Contains(string(steer.Payload), "wrap up") {
+		t.Fatalf("steer event missing or malformed: %+v", steer)
 	}
 	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/cancel", map[string]any{"nodeID": "w1"})
 	if code != http.StatusOK {

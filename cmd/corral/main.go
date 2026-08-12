@@ -184,6 +184,7 @@ func daemonCmd(port int, apiKey string) error {
 	log.Printf("run safeguards: breaker %d failures per %s; run budget %d tokens / $%.2f",
 		opts.BreakerMaxFailures, opts.BreakerWindow, opts.RunMaxTokens, opts.RunMaxCost)
 	d := daemon.New(st, s, daemon.NewOpenCodePlanner(oc, "", planTimeout()), dir, apiKey)
+	defer d.Close()
 	if err := d.Resume(ctx); err != nil {
 		log.Printf("resume: %v", err)
 	}

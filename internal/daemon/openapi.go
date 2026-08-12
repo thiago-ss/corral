@@ -10,7 +10,7 @@ import (
 // document and live responses against its schemas.
 const OpenAPI = `{
   "openapi": "3.0.3",
-  "info": {"title": "corral daemon API", "version": "0.8.0"},
+  "info": {"title": "corral daemon API", "version": "0.9.0"},
   "paths": {
     "/api/health": {
       "get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Health"}}}}}}
@@ -35,6 +35,17 @@ const OpenAPI = `{
     "/api/runs/{id}/steer": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/permission": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/export": {"get": {"responses": {"200": {"description": "audit export", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Export"}}}}}}},
+    "/api/runs/{id}/events": {
+      "get": {
+        "parameters": [{"name": "after", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0}, "description": "only emit durable events with seq greater than this cursor"}],
+        "responses": {
+          "200": {"description": "server-sent stream whose data field is a durable Event and whose id is Event.seq", "content": {"text/event-stream": {"schema": {"type": "string"}}}},
+          "400": {"description": "invalid cursor"},
+          "404": {"description": "run not found"},
+          "500": {"description": "event replay unavailable"}
+        }
+      }
+    },
     "/doc": {"get": {"responses": {"200": {"description": "openapi document"}}}}
   },
   "components": {
@@ -96,11 +107,11 @@ const OpenAPI = `{
         }
       },
       "Event": {
-        "type": "object", "required": ["seq", "type"],
+        "type": "object", "required": ["seq", "runID", "type", "createdAt"],
         "properties": {
-          "seq": {"type": "integer"}, "nodeID": {"type": "string"},
+          "seq": {"type": "integer"}, "runID": {"type": "string"}, "nodeID": {"type": "string"},
           "type": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"},
-          "attemptID": {"type": "string"}, "createdAt": {"type": "integer"}
+          "attemptID": {"type": "string"}, "payload": {}, "createdAt": {"type": "integer"}
         }
       },
       "Artifact": {

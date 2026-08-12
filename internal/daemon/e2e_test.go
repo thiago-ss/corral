@@ -71,6 +71,7 @@ func TestDaemonEndToEndRealOpenCode(t *testing.T) {
 		Concurrency: 2, Worktrees: wtm,
 	})
 	d := daemon.New(st, s, nil, proj, "")
+	t.Cleanup(d.Close)
 	srvHTTP := httptest.NewServer(d.Handler())
 	t.Cleanup(srvHTTP.Close)
 	api := &api{t: t, cli: srvHTTP.Client(), base: srvHTTP.URL}
