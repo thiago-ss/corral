@@ -960,6 +960,8 @@ func (h *RunHandle) PermissionSession(_ context.Context, id graph.NodeID) (adapt
 }
 
 // Steer sends a message to the in-flight attempt of a node (agent steer).
+// The steering action is recorded in the event log so it participates in
+// the monotonic per-run sequence streamed by the live-event endpoint.
 func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -967,7 +969,12 @@ func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) 
 	if !ok {
 		return fmt.Errorf("node %s has no in-flight attempt", id)
 	}
-	return rec.sess.Send(ctx, message)
+	if err := rec.sess.Send(ctx, message); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{"message": message})
+	_, err := h.s.store.AppendEvent(ctx, h.runID, string(id), store.EventSteer, graph.State(""), graph.State(""), rec.attemptID, string(payload), h.s.clk.Now())
+	return err
 }
 
 func (h *RunHandle) decideGate(ctx context.Context, id graph.NodeID, approve bool) error {
