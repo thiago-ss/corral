@@ -185,6 +185,7 @@ type WorktreeInfo struct {
 	Locked   bool
 	Detached bool
 	Orphaned bool // admin entry whose working directory is already gone
+	Dirty    bool // tracked, staged, or untracked work not recorded in HEAD
 }
 
 // List returns the attempt worktrees registered under the manager's
@@ -203,6 +204,11 @@ func (m *Manager) List(ctx context.Context) ([]WorktreeInfo, error) {
 			continue
 		}
 		info.Mtime = lastActivity(info.Path)
+		status, err := m.git(ctx, info.Path, "status", "--porcelain=v1", "--untracked-files=normal", "--ignored=no")
+		if err != nil {
+			return nil, err
+		}
+		info.Dirty = strings.TrimSpace(status) != ""
 		infos = append(infos, info)
 	}
 	return infos, nil
@@ -313,12 +319,12 @@ func (m *Manager) BranchMerged(ctx context.Context, branch string) (bool, error)
 	return code == 0, nil
 }
 
-// Prune removes worktrees that are safe to drop: their branch has been
-// merged into the main checkout branch or no longer exists, or (when
-// staleAfter > 0) their last activity is older than staleAfter. Locked
-// worktrees are skipped; orphaned git admin entries are pruned first via
-// `git worktree prune`. The main checkout is never touched. Returns the
-// paths removed.
+// Prune removes clean worktrees that are safe to drop: their branch has
+// been merged into the main checkout branch or no longer exists, or (when
+// staleAfter > 0) their last activity is older than staleAfter. Dirty,
+// locked, and detached worktrees are always skipped; orphaned git admin
+// entries are pruned first via `git worktree prune`. The main checkout is
+// never touched. Returns the paths removed.
 func (m *Manager) Prune(ctx context.Context, staleAfter time.Duration, now time.Time) ([]string, error) {
 	if _, err := m.git(ctx, m.repo, "worktree", "prune"); err != nil {
 		return nil, err
@@ -329,7 +335,7 @@ func (m *Manager) Prune(ctx context.Context, staleAfter time.Duration, now time.
 	}
 	var pruned []string
 	for _, info := range infos {
-		if info.Locked || info.Detached || info.Orphaned {
+		if info.Dirty || info.Locked || info.Detached || info.Orphaned {
 			continue
 		}
 		merged, err := m.BranchMerged(ctx, info.Branch)

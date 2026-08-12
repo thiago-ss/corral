@@ -98,7 +98,7 @@ func run(args []string) error {
 		return exportCmd(args[1], out)
 	case "worktrees":
 		fs := flag.NewFlagSet("worktrees", flag.ExitOnError)
-		prune := fs.Bool("prune", false, "prune worktrees whose branch was merged or removed")
+		prune := fs.Bool("prune", false, "prune clean worktrees whose branch was merged or removed")
 		stale := fs.Duration("stale", 0, "with --prune, also prune worktrees idle longer than this (e.g. 24h, 72h)")
 		fs.Parse(args[1:])
 		return worktreesCmd(*prune, *stale)
@@ -598,9 +598,9 @@ func exportCmd(runID, outFile string) error {
 }
 
 // worktreesCmd lists the attempt worktrees kept after failed attempts
-// and, with --prune, removes ones that are safe to drop (merged or
-// removed branches, plus stale ones beyond --stale). The main checkout
-// is never touched.
+// and, with --prune, removes clean ones that are safe to drop (merged or
+// removed branches, plus stale ones beyond --stale). Dirty worktrees and
+// the main checkout are never touched.
 func worktreesCmd(prune bool, stale time.Duration) error {
 	return worktreesCmdWithDir(dirOf(""), prune, stale)
 }
@@ -632,9 +632,16 @@ func worktreesCmdWithDir(dir string, prune bool, stale time.Duration) error {
 		return nil
 	}
 	for _, info := range infos {
-		mark := ""
+		var marks []string
+		if info.Dirty {
+			marks = append(marks, "dirty")
+		}
 		if info.Locked {
-			mark = " locked"
+			marks = append(marks, "locked")
+		}
+		mark := ""
+		if len(marks) > 0 {
+			mark = " " + strings.Join(marks, ",")
 		}
 		fmt.Printf("%-42s %-28s %-7s %s%s\n", info.Path, info.Branch, shortHead(info.Head), info.Mtime.Format("2006-01-02 15:04"), mark)
 	}

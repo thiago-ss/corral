@@ -140,6 +140,9 @@ func TestManagerList(t *testing.T) {
 	if info.Mtime.IsZero() {
 		t.Fatal("mtime zero")
 	}
+	if !info.Dirty {
+		t.Fatal("dirty worktree reported clean")
+	}
 	if info.Detached || info.Locked || info.Orphaned {
 		t.Fatalf("unexpected flags: %+v", info)
 	}
@@ -199,6 +202,41 @@ func TestManagerPruneMerged(t *testing.T) {
 	}
 }
 
+func TestManagerPruneSkipsDirtyMerged(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "merged.txt"), []byte("merged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "unfinished.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := m.Prune(ctx, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("dirty merged worktree pruned: %v", pruned)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "unfinished.txt")); err != nil || string(data) != "keep me" {
+		t.Fatalf("uncommitted work lost: %q (%v)", data, err)
+	}
+}
+
 func TestManagerPruneStale(t *testing.T) {
 	repo := t.TempDir()
 	gitInit(t, repo)
@@ -210,6 +248,9 @@ func TestManagerPruneStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CommitWorktree(ctx, path); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -236,6 +277,32 @@ func TestManagerPruneStale(t *testing.T) {
 	}
 	if _, code, _ := m.gitExit(ctx, m.repo, "rev-parse", "--verify", "--quiet", "refs/heads/corral/r1/w1/1"); code != 0 {
 		t.Fatal("unmerged stale branch should be kept")
+	}
+}
+
+func TestManagerPruneSkipsDirtyStale(t *testing.T) {
+	repo := t.TempDir()
+	gitInit(t, repo)
+	ctx := context.Background()
+	m := NewManager(repo)
+
+	path, err := m.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "unfinished.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := m.Prune(ctx, time.Hour, time.Now().Add(30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("dirty stale worktree pruned: %v", pruned)
+	}
+	if _, err := os.Stat(filepath.Join(path, "unfinished.txt")); err != nil {
+		t.Fatalf("uncommitted work lost: %v", err)
 	}
 }
 

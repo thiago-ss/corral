@@ -3,7 +3,7 @@
 Status: **DONE** — every writing node runs in its own git worktree; write
 scopes serialize conflicting writers; diffs become content-addressed
 artifacts; failed worktrees are kept; merges require checks + human
-approval. `corral worktrees` lists retained worktrees and prunes
+approval. `corral worktrees` lists retained worktrees and prunes clean
 merged/removed or stale ones without touching the main checkout. Verified
 deterministically and against a real OpenCode server.
 
@@ -19,16 +19,16 @@ deterministically and against a real OpenCode server.
   - `ScopesOverlap`: path-boundary prefix semantics; empty/`*` scope
     collides with everything.
   - `List`: enumerates attempt worktrees under `.corral-worktrees` via
-    `git worktree list --porcelain`, with branch, HEAD, and last-activity
-    mtime (worktree dir + gitdir HEAD/index); the main checkout is never
-    listed.
+    `git worktree list --porcelain`, with branch, HEAD, last-activity mtime
+    (worktree dir + gitdir HEAD/index), and dirty state; the main checkout
+    is never listed.
   - `BranchMerged`: reports whether a branch already has commits folded
     into the main checkout branch (or no longer exists); a branch still at
     the main tip is not "merged" so uncommitted work is never pruned.
-  - `Prune`: removes worktrees whose branch was merged/removed or whose
-    mtime exceeds a `staleAfter` threshold; sweeps orphaned git admin
-    entries via `git worktree prune`; skips locked worktrees; never touches
-    the main checkout.
+  - `Prune`: removes clean worktrees whose branch was merged/removed or
+    whose mtime exceeds a `staleAfter` threshold; sweeps orphaned git admin
+    entries via `git worktree prune`; skips dirty, locked, and detached
+    worktrees; never touches the main checkout.
 - `sched`:
   - Writing nodes (role `worker` or unlabeled agents) get a worktree per
     attempt; `Attempt.Cwd` and the attempt row record it (new
@@ -76,10 +76,11 @@ deterministically and against a real OpenCode server.
   everything); declare scopes to enable parallelism.
 - Worktrees are pruned only on successful merge; failed/abandoned
   worktrees stay on disk for inspection. `corral worktrees` lists them
-  (path, branch, HEAD, mtime) and `corral worktrees --prune` removes the
-  ones that are safe to drop — branches already merged into main or
-  removed — plus, with `--prune --stale <duration>` (e.g. `24h`), worktrees
-  idle longer than the threshold. Locked worktrees are never pruned, and
-  the main checkout is never touched. Stale-pruned branches are kept (their
-  commits stay recoverable) unless already merged.
+  (path, branch, HEAD, mtime, dirty/locked state) and `corral worktrees
+  --prune` removes clean ones that are safe to drop — branches already
+  merged into main or removed — plus, with `--prune --stale <duration>`
+  (e.g. `24h`), clean worktrees idle longer than the threshold. Dirty,
+  locked, and detached worktrees are never pruned, and the main checkout is
+  never touched. Stale-pruned branches are kept (their commits stay
+  recoverable) unless already merged.
 - Retries allocate a fresh worktree per attempt (deterministic redo).
