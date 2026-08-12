@@ -4,13 +4,18 @@
 package tui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -62,6 +67,7 @@ type AttemptView struct {
 
 type EventView struct {
 	Seq       int64           `json:"seq"`
+	RunID     string          `json:"runID,omitempty"`
 	NodeID    string          `json:"nodeID,omitempty"`
 	Type      string          `json:"type"`
 	From      string          `json:"from,omitempty"`
@@ -85,6 +91,7 @@ type RunDetail struct {
 type API interface {
 	ListRuns(ctx context.Context) ([]RunSummary, error)
 	GetRun(ctx context.Context, runID string) (*RunDetail, error)
+	StreamEvents(ctx context.Context, runID string, after int64, emit func(EventView) error) error
 	Tail(ctx context.Context, runID, nodeID string, lines int) ([]string, error)
 	Approve(ctx context.Context, runID, nodeID string) error
 	Reject(ctx context.Context, runID, nodeID string) error
@@ -156,11 +163,130 @@ func (c *Client) GetRun(ctx context.Context, runID string) (*RunDetail, error) {
 	return &out, err
 }
 
+// StreamEvents consumes raw durable store.Event frames from the daemon's
+// SSE endpoint. It blocks until the stream ends, context is canceled, or
+// emit returns an error. Reconnect callers pass the last accepted Seq as
+// after; duplicate frames are ignored defensively.
+func (c *Client) StreamEvents(ctx context.Context, runID string, after int64, emit func(EventView) error) error {
+	if runID == "" {
+		return fmt.Errorf("runID required")
+	}
+	if after < 0 {
+		return fmt.Errorf("after must not be negative")
+	}
+	path := fmt.Sprintf("/api/runs/%s/events?after=%d", url.PathEscape(runID), after)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-Corral-Role", c.Role)
+	if c.Key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Key)
+	}
+	client := &http.Client{}
+	if c.HTTP != nil {
+		// SSE is intentionally long-lived, so omit the normal request timeout
+		// while retaining caller-supplied transport/redirect/cookie behavior.
+		client.Transport = c.HTTP.Transport
+		client.CheckRedirect = c.HTTP.CheckRedirect
+		client.Jar = c.HTTP.Jar
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 201))
+		return fmt.Errorf("GET %s: %d %s", path, resp.StatusCode, truncate(string(data), 200))
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "text/event-stream" {
+		return fmt.Errorf("GET %s: unexpected content type %q", path, resp.Header.Get("Content-Type"))
+	}
+
+	cursor := after
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	var eventID string
+	var data []string
+	dispatch := func() error {
+		if len(data) == 0 {
+			eventID = ""
+			return nil
+		}
+		var event EventView
+		if err := json.Unmarshal([]byte(strings.Join(data, "\n")), &event); err != nil {
+			return fmt.Errorf("decode event: %w", err)
+		}
+		if event.Seq <= 0 {
+			return fmt.Errorf("event has invalid seq %d", event.Seq)
+		}
+		if eventID != "" {
+			id, err := strconv.ParseInt(eventID, 10, 64)
+			if err != nil || id != event.Seq {
+				return fmt.Errorf("event id %q does not match seq %d", eventID, event.Seq)
+			}
+		}
+		eventID, data = "", nil
+		if event.Seq <= cursor {
+			return nil
+		}
+		if emit == nil {
+			return errors.New("event emitter required")
+		}
+		if err := emit(event); err != nil {
+			return err
+		}
+		cursor = event.Seq
+		return nil
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if err := dispatch(); err != nil {
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, ok := strings.Cut(line, ":")
+		if ok && strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		switch field {
+		case "id":
+			eventID = value
+		case "data":
+			data = append(data, value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if err := dispatch(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return io.EOF
+}
+
 func (c *Client) Tail(ctx context.Context, runID, nodeID string, lines int) ([]string, error) {
+	if runID == "" || nodeID == "" {
+		return nil, fmt.Errorf("runID and nodeID required")
+	}
+	if lines < 1 || lines > 500 {
+		return nil, fmt.Errorf("lines must be between 1 and 500")
+	}
 	var out struct {
 		Lines []string `json:"lines"`
 	}
-	path := fmt.Sprintf("/api/runs/%s/tail?node=%s&lines=%d", runID, url.QueryEscape(nodeID), lines)
+	path := fmt.Sprintf("/api/runs/%s/tail?node=%s&lines=%d", url.PathEscape(runID), url.QueryEscape(nodeID), lines)
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
 	return out.Lines, err
 }

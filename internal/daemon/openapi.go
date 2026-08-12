@@ -29,7 +29,7 @@ const OpenAPI = `{
       "get": {"parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "timeout", "in": "query", "schema": {"type": "integer"}}], "responses": {"200": {"description": "run snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WatchResponse"}}}}}}
     },
     "/api/runs/{id}/tail": {
-      "get": {"responses": {"200": {"description": "live attempt tail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Tail"}}}}}}
+      "get": {"parameters": [{"name": "node", "in": "query", "required": true, "schema": {"type": "string", "maxLength": 256}}, {"name": "lines", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 40}}], "responses": {"200": {"description": "live attempt tail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Tail"}}}}, "400": {"description": "invalid node or line count"}, "404": {"description": "run not found"}, "409": {"description": "node has no live attempt"}}}
     },
     "/api/runs/{id}/approve": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/reject": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},

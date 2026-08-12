@@ -983,12 +983,20 @@ func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) 
 // live session (e.g. inline check/gate nodes).
 func (h *RunHandle) Tail(ctx context.Context, id graph.NodeID, n int) ([]string, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	rec, ok := h.sessions[id]
-	if !ok {
+	rec := h.sessions[id]
+	if rec == nil {
+		rec = h.suspended[id]
+	}
+	if rec == nil {
+		h.mu.Unlock()
 		return nil, fmt.Errorf("node %s has no in-flight attempt", id)
 	}
-	msgs, err := rec.sess.Messages(ctx)
+	// Session calls may perform network I/O. Copy the stable interface
+	// reference while protected, then release the scheduler mutex before
+	// waiting on the provider.
+	sess := rec.sess
+	h.mu.Unlock()
+	msgs, err := sess.Messages(ctx)
 	if err != nil {
 		return nil, err
 	}

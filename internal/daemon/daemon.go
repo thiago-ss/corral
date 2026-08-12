@@ -466,16 +466,20 @@ func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx 
 // handleTail returns the live transcript tail of a node's in-flight
 // attempt (query params: node, lines). Used by the TUI's inspect view.
 func (d *Daemon) handleTail(w http.ResponseWriter, r *http.Request) {
-	node := r.URL.Query().Get("node")
-	if node == "" {
+	q := r.URL.Query()
+	node := q.Get("node")
+	if node == "" || len(node) > 256 {
 		http.Error(w, "node required", http.StatusBadRequest)
 		return
 	}
 	lines := 40
-	if v := r.URL.Query().Get("lines"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			lines = n
+	if v := q.Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			http.Error(w, "lines must be between 1 and 500", http.StatusBadRequest)
+			return
 		}
+		lines = n
 	}
 	h, err := d.runHandle(r.PathValue("id"))
 	if err != nil {

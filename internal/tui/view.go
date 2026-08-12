@@ -120,6 +120,9 @@ func (m *Model) viewDetail() string {
 	// DAG view: nodes in dependency order, arrows between them.
 	b.WriteString(styleDim.Render("dag") + "\n")
 	nodes := m.detail.Graph.Nodes
+	if len(nodes) == 0 {
+		b.WriteString(styleMuted.Render("  no nodes") + "\n")
+	}
 	byID := map[string]GraphNode{}
 	for _, n := range nodes {
 		byID[n.ID] = n
@@ -131,9 +134,10 @@ func (m *Model) viewDetail() string {
 	for _, n := range order {
 		indeg[n.ID] = len(n.DependsOn)
 	}
+	selected, _ := m.nodeAt(m.nodeCursor)
 	for _, n := range order {
 		line := "  " + m.nodeLine(n, indeg[n.ID])
-		if n.ID == m.detail.Graph.Nodes[m.nodeCursor].ID {
+		if n.ID == selected {
 			line = styleSelected.Render(line)
 		}
 		b.WriteString(line + "\n")
@@ -172,7 +176,7 @@ func (m *Model) nodeLine(n GraphNode, deps int) string {
 // nodeBudgetBar renders a compact budget-usage bar for a node. The
 // dominant budget dimension (time, tokens, or cost) drives the bar, with
 // the used/limit figures beside it. Nodes without a budget show "".
-func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, state string) string {
+func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, _ string) string {
 	maxDur := n.Budget.MaxDuration
 	maxTok := n.Budget.MaxTokens
 	maxCost := n.Budget.MaxCost
@@ -202,24 +206,38 @@ func (m *Model) nodeBudgetBar(n GraphNode, atts []AttemptView, state string) str
 		usedTok += at.Tokens
 		usedCost += at.Cost
 	}
-	// Choose the dominant dimension.
-	var frac float64
-	var label string
-	switch {
-	case maxDur > 0:
-		frac = float64(usedDur) / float64(time.Duration(maxDur))
-		label = fmt.Sprintf("%s/%s", usedDur.Round(time.Second), time.Duration(maxDur).Round(time.Second))
-	case maxTok > 0:
-		frac = float64(usedTok) / float64(maxTok)
-		label = fmt.Sprintf("%dk/%dk", usedTok/1000, maxTok/1000)
-	default:
-		frac = usedCost / maxCost
-		label = fmt.Sprintf("$%.2f/%.2f", usedCost, maxCost)
+	// Choose the highest-utilization configured dimension. Completion is
+	// lifecycle progress, not budget consumption, so done nodes retain
+	// their actual utilization.
+	type usage struct {
+		fraction float64
+		label    string
 	}
-	if state == "done" {
-		frac = 1
+	var dominant usage
+	consider := func(candidate usage) {
+		if dominant.label == "" || candidate.fraction > dominant.fraction {
+			dominant = candidate
+		}
 	}
-	return progressBar(frac, 8) + " " + styleMuted.Render(label)
+	if maxDur > 0 {
+		consider(usage{
+			fraction: float64(usedDur) / float64(time.Duration(maxDur)),
+			label:    fmt.Sprintf("time %s/%s", usedDur.Round(time.Second), time.Duration(maxDur).Round(time.Second)),
+		})
+	}
+	if maxTok > 0 {
+		consider(usage{
+			fraction: float64(usedTok) / float64(maxTok),
+			label:    fmt.Sprintf("tokens %d/%d", usedTok, maxTok),
+		})
+	}
+	if maxCost > 0 {
+		consider(usage{
+			fraction: usedCost / maxCost,
+			label:    fmt.Sprintf("cost $%.2f/$%.2f", usedCost, maxCost),
+		})
+	}
+	return progressBar(dominant.fraction, 8) + " " + styleMuted.Render(dominant.label)
 }
 
 // now returns the model's wall-clock reference (last tick time, or real

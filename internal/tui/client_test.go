@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -304,5 +306,49 @@ func TestTailAgainstDaemon(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("tail missing %q: %q", want, joined)
 		}
+	}
+}
+
+func TestTailRejectsInvalidLineCount(t *testing.T) {
+	client := NewClient("http://unused.invalid", "")
+	for _, lines := range []int{0, -1, 501} {
+		if _, err := client.Tail(context.Background(), "run", "node", lines); err == nil {
+			t.Fatalf("Tail accepted lines=%d", lines)
+		}
+	}
+}
+
+func TestStreamEventsUsesCursorAndRawFrames(t *testing.T) {
+	var gotPath, gotAccept, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		gotAccept = r.Header.Get("Accept")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		fmt.Fprint(w, ": ping\n\n")
+		fmt.Fprint(w, "id: 8\n")
+		fmt.Fprint(w, `data: {"seq":8,"runID":"run id","nodeID":"w1","type":"transition","from":"running","to":"blocked","payload":{"reason":"permission","permissionID":"p1"},"createdAt":123}`+"\n\n")
+		fmt.Fprint(w, "id: 8\n") // duplicate must be ignored
+		fmt.Fprint(w, `data: {"seq":8,"runID":"run id","nodeID":"w1","type":"transition"}`+"\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL, "secret")
+	var events []EventView
+	err := client.StreamEvents(context.Background(), "run id", 7, func(event EventView) error {
+		events = append(events, event)
+		return nil
+	})
+	if err == nil || err.Error() != "EOF" {
+		t.Fatalf("closed stream err = %v, want EOF", err)
+	}
+	if gotPath != "/api/runs/run%20id/events?after=7" {
+		t.Fatalf("stream path = %q", gotPath)
+	}
+	if gotAccept != "text/event-stream" || gotAuth != "Bearer secret" {
+		t.Fatalf("stream headers accept=%q auth=%q", gotAccept, gotAuth)
+	}
+	if len(events) != 1 || events[0].Seq != 8 || events[0].To != "blocked" || string(events[0].Payload) == "" {
+		t.Fatalf("events = %+v", events)
 	}
 }
