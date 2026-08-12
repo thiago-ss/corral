@@ -3,3 +3,4 @@ bin/
 .DS_Store
 .corral/
 /corral
+/opencode.json
