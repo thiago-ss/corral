@@ -75,3 +75,10 @@ func TestTailRejectsInvalidLineCount(t *testing.T) {
 		}
 	}
 }
+
+func TestTranscriptLinesEmptyReturnsEmptySlice(t *testing.T) {
+	lines := transcriptLines(nil, 10)
+	if lines == nil || len(lines) != 0 {
+		t.Fatalf("transcriptLines(nil) = %#v, want non-nil empty slice", lines)
+	}
+}

@@ -84,7 +84,7 @@ func (m *Model) viewList() string {
 			if i == m.cursor {
 				line = styleSelected.Render(line)
 			}
-			if r.Done {
+			if r.Status == "completed" {
 				line += styleOK.Render(" ✓")
 			}
 			b.WriteString(line + "\n")
@@ -100,7 +100,7 @@ func (m *Model) viewDetail() string {
 	}
 	var b strings.Builder
 	b.WriteString(styleTitle.Render(fmt.Sprintf("run %s  [%s]", m.detail.RunID, m.detail.Status)))
-	if m.detail.Done {
+	if m.detail.Status == "completed" {
 		b.WriteString(styleOK.Render(" ✓ done"))
 	}
 	// Overall run progress: done nodes / total.

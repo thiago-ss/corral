@@ -241,12 +241,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			initial := m.detail == nil || m.detail.RunID != v.detail.RunID
+			snapshotCursor := int64(0)
+			for _, event := range v.detail.Events {
+				if event.Seq > snapshotCursor {
+					snapshotCursor = event.Seq
+				}
+			}
+			// An action/fallback GET can race a healthy stream. Never let an
+			// older snapshot overwrite state already materialized from SSE.
+			if !initial && snapshotCursor < m.eventCursor {
+				return m, nil
+			}
 			m.detail = v.detail
 			m.err = nil
-			for _, event := range m.detail.Events {
-				if event.Seq > m.eventCursor {
-					m.eventCursor = event.Seq
-				}
+			if snapshotCursor > m.eventCursor {
+				m.eventCursor = snapshotCursor
 			}
 			if m.nodeCursor >= len(m.detail.Graph.Nodes) {
 				m.nodeCursor = 0
@@ -310,13 +319,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if event.Seq <= m.eventCursor {
 			return m, waitEventStreamCmd(v.runID, v.items)
 		}
-		if m.eventCursor > 0 && event.Seq != m.eventCursor+1 {
+		if event.Seq != m.eventCursor+1 {
 			m.stopEventStream()
 			m.status = "event stream gap; polling"
 			return m, fetchRunCmd(m)
 		}
 		needsRefresh := m.applyEvent(event)
-		cmds := []tea.Cmd{waitEventStreamCmd(v.runID, v.items)}
+		var cmds []tea.Cmd
+		// applyEvent stops the channel on a terminal run event. Only wait for
+		// another frame while this channel is still the active stream.
+		if m.streamItems == v.items {
+			cmds = append(cmds, waitEventStreamCmd(v.runID, v.items))
+		}
 		if cmd := m.checkAttention(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -575,7 +589,11 @@ func (m *Model) stopEventStream() {
 }
 
 func (m *Model) runTerminal() bool {
-	return m.detail != nil && (m.detail.Status == "completed" || m.detail.Status == "canceled")
+	return m.detail != nil && terminalRunStatus(m.detail.Status)
+}
+
+func terminalRunStatus(status string) bool {
+	return status == "completed" || status == "canceled"
 }
 
 func (m *Model) seedAttentionStates() {

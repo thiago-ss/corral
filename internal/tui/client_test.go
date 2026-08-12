@@ -352,3 +352,20 @@ func TestStreamEventsUsesCursorAndRawFrames(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 }
+
+func TestStreamEventsRejectsNilEmitterBeforeRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL, "")
+	if err := client.StreamEvents(context.Background(), "run", 0, nil); err == nil {
+		t.Fatal("StreamEvents accepted nil emitter")
+	}
+	if requests != 0 {
+		t.Fatalf("nil emitter opened %d HTTP requests", requests)
+	}
+}

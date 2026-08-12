@@ -1012,7 +1012,7 @@ func (h *RunHandle) Tail(ctx context.Context, id graph.NodeID, n int) ([]string,
 // transcriptLines flattens a session transcript into text lines and keeps
 // only the last n of them (a "tail").
 func transcriptLines(msgs []adapter.Message, n int) []string {
-	var lines []string
+	lines := make([]string, 0)
 	for _, m := range msgs {
 		for _, ln := range strings.Split(m.Text, "\n") {
 			if ln == "" {

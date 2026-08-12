@@ -174,6 +174,9 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, after int64, em
 	if after < 0 {
 		return fmt.Errorf("after must not be negative")
 	}
+	if emit == nil {
+		return errors.New("event emitter required")
+	}
 	path := fmt.Sprintf("/api/runs/%s/events?after=%d", url.PathEscape(runID), after)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+path, nil)
 	if err != nil {
@@ -232,9 +235,6 @@ func (c *Client) StreamEvents(ctx context.Context, runID string, after int64, em
 		eventID, data = "", nil
 		if event.Seq <= cursor {
 			return nil
-		}
-		if emit == nil {
-			return errors.New("event emitter required")
 		}
 		if err := emit(event); err != nil {
 			return err

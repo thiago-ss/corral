@@ -484,6 +484,42 @@ func TestEventUpdatesStateIncrementallyAndAdvancesCursor(t *testing.T) {
 	}
 }
 
+func TestFirstStreamEventGapFallsBackWithoutApplying(t *testing.T) {
+	d := sampleDetail()
+	d.Events = nil
+	d.States["w1"] = "pending"
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.detail, m.mode = "run_1", d, modeDetail
+	items := make(chan eventStreamItem)
+	m.streamItems = items
+	m.streamCancel = func() {}
+	event := EventView{Seq: 2, RunID: "run_1", Type: "transition", NodeID: "w1", From: "pending", To: "running"}
+
+	_, cmd := m.Update(eventStreamItemMsg{runID: "run_1", items: items, item: eventStreamItem{event: &event}})
+	if m.eventCursor != 0 || m.detail.States["w1"] != "pending" {
+		t.Fatalf("gapped event applied: cursor=%d state=%q", m.eventCursor, m.detail.States["w1"])
+	}
+	if m.streamItems != nil || cmd == nil {
+		t.Fatal("gapped event did not stop stream and request full refresh")
+	}
+}
+
+func TestStaleFullRefreshDoesNotOverwriteNewerEventState(t *testing.T) {
+	current := sampleDetail()
+	current.Events = []EventView{{Seq: 5, Type: "transition", NodeID: "w1", From: "leased", To: "running"}}
+	current.States["w1"] = "running"
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.detail, m.mode, m.eventCursor = "run_1", current, modeDetail, 5
+
+	stale := sampleDetail()
+	stale.Events = []EventView{{Seq: 4, Type: "transition", NodeID: "w1", From: "ready", To: "leased"}}
+	stale.States["w1"] = "leased"
+	m.Update(fetchRunMsg{runID: "run_1", detail: stale})
+	if m.detail.States["w1"] != "running" || m.eventCursor != 5 {
+		t.Fatalf("stale refresh regressed state: cursor=%d state=%q", m.eventCursor, m.detail.States["w1"])
+	}
+}
+
 func TestDroppedStreamFallsBackToFullRefreshAndReconnectsFromCursor(t *testing.T) {
 	api := &fakeAPI{detail: sampleDetail()}
 	m := New(api, context.Background())
@@ -563,6 +599,25 @@ func TestWaitingRunKeepsStreamForExternalResolution(t *testing.T) {
 	}
 }
 
+func TestTerminalRunEventStopsWithoutAnotherStreamWait(t *testing.T) {
+	d := sampleDetail()
+	d.States["w1"] = "done"
+	m := New(&fakeAPI{detail: d}, context.Background())
+	m.selectedID, m.detail, m.mode, m.eventCursor = "run_1", d, modeDetail, 4
+	items := make(chan eventStreamItem)
+	m.streamItems = items
+	m.streamCancel = func() {}
+	event := EventView{Seq: 5, RunID: "run_1", Type: "run", Payload: json.RawMessage(`{"status":"completed"}`)}
+
+	_, cmd := m.Update(eventStreamItemMsg{runID: "run_1", items: items, item: eventStreamItem{event: &event}})
+	if m.streamItems != nil || !m.runTerminal() {
+		t.Fatal("terminal run event did not stop stream")
+	}
+	if _, ok := cmd().(tea.BatchMsg); ok {
+		t.Fatal("terminal event enqueued another wait on stopped stream")
+	}
+}
+
 func TestInitialWaitingRunStartsEventStream(t *testing.T) {
 	d := sampleDetail()
 	d.Status = "waiting"
@@ -572,6 +627,17 @@ func TestInitialWaitingRunStartsEventStream(t *testing.T) {
 	_, cmd := m.Update(fetchRunMsg{runID: "run_1", detail: d})
 	if cmd == nil || !m.streamConnecting {
 		t.Fatal("initial waiting run did not start event stream")
+	}
+}
+
+func TestWaitingRunDoesNotRenderDoneMarker(t *testing.T) {
+	d := sampleDetail()
+	d.Status = "waiting"
+	d.Done = true
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.detail, m.mode = "run_1", d, modeDetail
+	if got := m.View(); strings.Contains(got, "✓ done") {
+		t.Fatalf("waiting run rendered terminal marker:\n%s", got)
 	}
 }
 
