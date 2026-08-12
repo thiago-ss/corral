@@ -19,9 +19,12 @@ flow is verified end-to-end against a real OpenCode server.
     authorizes the orchestrator to call the normal approval endpoint.
   - `GET /api/runs`, `GET /api/runs/{id}` — follow execution (states,
     attempts, event log).
-  - `GET /api/runs/{id}/watch` — Server-Sent Events stream of run deltas
-    (node transitions, gates awaiting approval, run done) from an `after`
-    cursor; powers `corral_watch`.
+  - `GET /api/runs/{id}/watch` — bounded JSON long-poll of run deltas from a
+    `since` cursor (node transitions, gates awaiting approval, run done);
+    powers `corral_watch`.
+  - `GET /api/runs/{id}/events` — raw durable Server-Sent Events stream from
+    an `after` cursor, with replay, live delivery, heartbeat frames, and
+    terminal close; powers streaming clients such as the companion TUI.
   - `approve` / `reject` / `cancel` / `retry` / `steer` per node —
     including `RetryNode` (blocked→ready, retry_wait→ready, failed→ready
     operator override with retry budget reset) and run-loop restart after
@@ -37,8 +40,8 @@ flow is verified end-to-end against a real OpenCode server.
   `corral_start` (accepts the raw graph *or* the full `corral_plan` output,
   unwrapping a leading `{"graph": ...}` wrapper, plus an optional
   `autoApproveGates` flag), `corral_status`, `corral_watch` (blocks on the
-  daemon SSE stream and returns the first run delta — node transition, gate
-  awaiting approval, or run done — or times out), `corral_approve`,
+  daemon long-poll endpoint and returns the first run delta — node transition,
+  gate awaiting approval, or run done — or times out), `corral_approve`,
   `corral_reject`, `corral_cancel`, `corral_retry`, `corral_steer`, calling
   the daemon and mapping the session agent (`corral-*`) to a role.
 - `example/opencode.json` — agent role configuration using OpenCode's

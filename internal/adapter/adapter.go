@@ -1,7 +1,7 @@
 // Package adapter defines the generic executor contract that corral's
-// scheduler uses to run nodes. OpenCode is the first implementation
-// (Task 3); Codex, Claude and generic CLI drivers must satisfy the same
-// interface. Nothing in this package depends on OpenCode.
+// scheduler uses to run nodes. OpenCode is the production-wired
+// implementation; the standalone Claude Code adapter satisfies the same
+// contract. Nothing in this package depends on either provider.
 package adapter
 
 import (

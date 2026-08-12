@@ -88,7 +88,7 @@ Inside OpenCode:
 3. Switch to `corral-orchestrator` and ask it to start that graph.
 4. Follow progress with `corral_status` / `corral_watch`; approve, reject,
    retry, cancel, or steer nodes when needed. `corral_start` accepts an
-   optional `autoApproveGates` flag pre-authorizes the orchestrator to call
+   optional `autoApproveGates` flag that pre-authorizes the orchestrator to call
    the normal gate approval endpoint without waiting for the operator.
 
 Or follow the same run from the terminal:
@@ -101,9 +101,12 @@ corral tui
   <a href="docs/assets/tui.svg"><picture><source media="(max-width: 900px)" srcset="docs/assets/tui-mobile.svg"><img src="docs/assets/tui.svg" alt="Corral TUI inspecting a completed attempt, its worktree, command gate, and exit evidence" width="960"></picture></a>
 </div>
 
-The TUI exposes the graph, node states, attempts, sessions, worktrees, evidence,
-and operator actions. Worker edits stay in attempt worktrees; initialization
-itself may add the OpenCode tool and agent config to your checkout.
+The TUI follows durable server-sent run events, falls back to polling after a
+stream failure, and exposes graph state, live transcript tails, budget usage,
+attempts, sessions, worktrees, evidence, permissions, and operator actions. It
+can raise desktop attention when a gate needs approval or a node fails. Worker
+edits stay in attempt worktrees; initialization itself may add the OpenCode tool
+and agent config to your checkout.
 
 ## What counts as evidence
 
@@ -160,8 +163,10 @@ evidence remain stored when an attempt retries.
 - **Landing:** merge nodes commit accepted worktree changes, merge branches with
   `--no-ff`, run their post-merge command, and prune consumed worktrees.
 
-OpenCode is the implemented driver. The generic `adapter.Driver` interface is
-the seam for future executors.
+OpenCode is the production-wired driver. A self-contained Claude Code adapter
+implements the same contract, including scoped permission mediation, but is not
+yet selected by `corral daemon`. The generic `adapter.Driver` interface remains
+the seam for additional executors.
 
 ## Operations
 
@@ -226,6 +231,7 @@ The core packages are deliberately small:
 | `internal/verify` | command, JSON Schema, diff, and reviewer evidence |
 | `internal/worktree` | branch/worktree lifecycle and diff artifacts |
 | `internal/ocxadapter` | OpenCode sessions and completion reconciliation |
+| `internal/claudeadapter` | standalone Claude Code sessions, usage, and permission mediation |
 | `internal/ocxreviewer` | OpenCode reviewer sessions for the reviewer gate |
 | `internal/daemon` | control API, planning, role routing, audit export |
 | `internal/tui` | terminal dashboard and operator controls |
@@ -235,9 +241,11 @@ Visual language, color roles, and asset rules live in the
 
 ## Scope
 
-Corral is currently local, single-machine, single-repository software with one
-implemented executor: OpenCode. Distributed workers, Codex/Claude drivers,
-interactive graph editing, and a web dashboard remain roadmap work.
+Corral is currently local, single-machine, single-repository software. OpenCode
+is the production-wired executor; the Claude Code adapter is available as a
+self-contained package but has no daemon selection/configuration path yet.
+Distributed workers, a Codex driver, interactive graph editing, and a web
+dashboard remain roadmap work.
 
 ## License
 
