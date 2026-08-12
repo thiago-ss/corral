@@ -3,12 +3,70 @@ package sched_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"corral/internal/adapter"
 	"corral/internal/graph"
 	"corral/internal/sched"
 	"corral/internal/verify"
 )
+
+func TestPermissionWaitPausesAttemptTimeBudget(t *testing.T) {
+	st := newStore(t)
+	clk := fakeClock()
+	n := agent("w1")
+	n.Budget.MaxDuration = 10 * tick
+
+	drv := sched.NewFakeDriver(clk, map[string][]sched.Script{
+		"w1": {{Delay: time.Hour, Permission: "perm-1"}},
+	})
+	s := newSched(t, st, drv, &sched.EngineVerifier{Eng: verify.New(t.TempDir())}, clk, sched.Options{Concurrency: 1})
+	h, err := s.Create(context.Background(), "run-budget-pause", &graph.Graph{Nodes: []*graph.Node{n}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		step(h, clk, ctx)
+		if state, _ := h.State("w1"); state == graph.StateBlocked {
+			break
+		}
+	}
+	if state, _ := h.State("w1"); state != graph.StateBlocked {
+		t.Fatalf("w1 = %s, want blocked on permission", state)
+	}
+
+	// Time spent waiting for an operator must not consume attempt runtime.
+	clk.Advance(100 * tick)
+	ps, err := h.PermissionSession(ctx, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.RespondPermission(ctx, "perm-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	step(h, clk, ctx) // resumes and re-arms the saved runtime budget
+
+	clk.Advance(8 * tick)
+	if err := h.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := h.State("w1"); state != graph.StateRunning {
+		t.Fatalf("w1 = %s before saved budget elapsed, want running", state)
+	}
+
+	clk.Advance(2 * tick)
+	if err := h.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := h.State("w1"); state != graph.StateFailed {
+		t.Fatalf("w1 = %s after saved budget elapsed, want failed", state)
+	}
+}
 
 // TestPermissionRequestBlocksExplicitly drives the permission flow: the
 // node moves to an explicit blocked state while the session waits, then

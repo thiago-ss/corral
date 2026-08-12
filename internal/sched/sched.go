@@ -105,6 +105,8 @@ type sessionRec struct {
 	sess          adapter.Session
 	deadline      time.Time
 	budgeted      bool // time budget active
+	budgetPaused  bool
+	budgetRemain  time.Duration
 	abortIsBudget bool // abort was initiated by the scheduler (budget), not operator
 	worktree      string
 	branch        string
@@ -331,6 +333,10 @@ func (h *RunHandle) Step(ctx context.Context) error {
 		}
 		delete(h.sessions, id)
 		h.suspended[id] = rec
+		if rec.budgeted && !rec.deadline.IsZero() {
+			rec.budgetRemain = max(rec.deadline.Sub(now), 0)
+			rec.budgetPaused = true
+		}
 		rec.budgeted = false
 		payload, _ := json.Marshal(map[string]any{"reason": "permission", "permissionID": pid})
 		if err := h.transit(ctx, id, graph.StateRunning, graph.StateBlocked, string(payload)); err != nil {
@@ -350,10 +356,13 @@ func (h *RunHandle) Step(ctx context.Context) error {
 		}
 		delete(h.suspended, id)
 		h.sessions[id] = rec
-		if n := h.nodeByID(id); n != nil && n.Budget.MaxDuration > 0 {
-			// Re-arm the time budget with the remaining time.
-			rec.deadline = now.Add(time.Until(rec.deadline).Round(0))
+		if rec.budgetPaused {
+			// Permission waits do not consume provider runtime. Re-arm against
+			// the scheduler clock with the budget left when the node blocked.
+			rec.deadline = now.Add(rec.budgetRemain)
 			rec.budgeted = true
+			rec.budgetPaused = false
+			rec.budgetRemain = 0
 		}
 		if h.done {
 			h.done = false
