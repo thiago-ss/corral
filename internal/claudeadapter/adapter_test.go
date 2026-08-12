@@ -1,8 +1,10 @@
 package claudeadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +48,76 @@ type fakeProc struct {
 	mu      sync.Mutex
 	exited  bool
 	waitErr error
+}
+
+// faultReader emits valid stream data, one synthetic read error, then more
+// bytes. drained closes only after a caller keeps reading through the fault.
+type faultReader struct {
+	before  []byte
+	after   []byte
+	fault   error
+	stage   int
+	drained chan struct{}
+	once    sync.Once
+}
+
+func (r *faultReader) Read(p []byte) (int, error) {
+	switch r.stage {
+	case 0:
+		if len(r.before) > 0 {
+			n := copy(p, r.before)
+			r.before = r.before[n:]
+			return n, nil
+		}
+		r.stage++
+		return 0, r.fault
+	case 1:
+		if len(r.after) > 0 {
+			n := copy(p, r.after)
+			r.after = r.after[n:]
+			if len(r.after) == 0 {
+				r.stage++
+				r.once.Do(func() { close(r.drained) })
+			}
+			return n, nil
+		}
+		r.stage++
+		r.once.Do(func() { close(r.drained) })
+		return 0, io.EOF
+	default:
+		r.once.Do(func() { close(r.drained) })
+		return 0, io.EOF
+	}
+}
+
+type faultProc struct {
+	r        *faultReader
+	doneCh   chan struct{}
+	doneOnce sync.Once
+}
+
+func newFaultProc(before, after []byte, fault error) *faultProc {
+	drained := make(chan struct{})
+	p := &faultProc{
+		r:      &faultReader{before: before, after: after, fault: fault, drained: drained},
+		doneCh: make(chan struct{}),
+	}
+	go func() {
+		<-drained
+		p.doneOnce.Do(func() { close(p.doneCh) })
+	}()
+	return p
+}
+
+func (p *faultProc) stdout() io.Reader     { return p.r }
+func (p *faultProc) done() <-chan struct{} { return p.doneCh }
+func (p *faultProc) wait() error {
+	<-p.doneCh
+	return nil
+}
+func (p *faultProc) signal(os.Signal) error {
+	p.doneOnce.Do(func() { close(p.doneCh) })
+	return nil
 }
 
 func newFakeProc() (*fakeProc, *io.PipeReader) {
@@ -240,7 +312,11 @@ func TestStartCompletion(t *testing.T) {
 		"usage":   map[string]any{"input_tokens": 5, "output_tokens": 3},
 		"content": []map[string]any{{"type": "text", "text": "Done. src/alpha.txt exists."}},
 	}})
-	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sid, "result": "Done."})
+	fp.write(map[string]any{
+		"type": "result", "subtype": "success", "session_id": sid, "result": "Done.",
+		"total_cost_usd": 0.004,
+		"usage":          map[string]any{"input_tokens": 15, "output_tokens": 23},
+	})
 	fp.finish(nil)
 
 	cs := drainSteps(drv, 1)
@@ -264,14 +340,17 @@ func TestStartCompletion(t *testing.T) {
 	if msgs[0].Role != "assistant" || !strings.Contains(msgs[0].Text, "I will create the file.") {
 		t.Errorf("msg[0] = %+v", msgs[0])
 	}
-	if msgs[0].Tokens != 30 {
-		t.Errorf("msg[0] tokens = %d, want 30", msgs[0].Tokens)
+	if msgs[0].Tokens != 0 || msgs[0].Cost != 0 {
+		t.Errorf("msg[0] has per-turn accounting: %+v", msgs[0])
 	}
 	if msgs[1].Role != "user" || !strings.Contains(msgs[1].Text, "wrote src/alpha.txt") {
 		t.Errorf("msg[1] = %+v", msgs[1])
 	}
 	if !strings.Contains(msgs[2].Text, "Done.") {
 		t.Errorf("msg[2] = %+v", msgs[2])
+	}
+	if msgs[2].Tokens != 38 || msgs[2].Cost != 0.004 {
+		t.Errorf("msg[2] cumulative accounting = %+v", msgs[2])
 	}
 
 	// The session view exposes the same transcript.
@@ -318,6 +397,155 @@ func TestStartCompletion(t *testing.T) {
 	}
 	if !strings.Contains(fp.spec.args[1], a.Objective) {
 		t.Errorf("prompt missing objective: %q", fp.spec.args[1])
+	}
+}
+
+func TestLargeStreamJSONRecordIsNotLost(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 20 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("x", 256<<10)
+	fp.write(map[string]any{"type": "assistant", "message": map[string]any{
+		"role": "assistant", "content": []map[string]any{{"type": "text", "text": want}},
+	}})
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 || cs[0].Status != adapter.StatusIdle {
+		t.Fatalf("completion = %+v, want one idle", cs)
+	}
+	if len(cs[0].Messages) != 1 || cs[0].Messages[0].Text != want {
+		t.Fatalf("large record transcript length = %d, text bytes = %d", len(cs[0].Messages), func() int {
+			if len(cs[0].Messages) == 0 {
+				return 0
+			}
+			return len(cs[0].Messages[0].Text)
+		}())
+	}
+}
+
+func TestFloodedStreamPreservesEveryEventInOrder(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: time.Hour})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const count = 2048
+	for i := 0; i < count; i++ {
+		fp.write(map[string]any{"type": "assistant", "message": map[string]any{
+			"role":    "assistant",
+			"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("%04d", i)}},
+		}})
+	}
+	fp.write(map[string]any{"type": "result", "subtype": "success", "session_id": sess.ID()})
+	fp.finish(nil)
+
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 {
+		t.Fatalf("completions = %d, want 1", len(cs))
+	}
+	if got := len(cs[0].Messages); got != count {
+		t.Fatalf("messages = %d, want %d", got, count)
+	}
+	for i, msg := range cs[0].Messages {
+		if want := fmt.Sprintf("%04d", i); msg.Text != want {
+			t.Fatalf("message[%d] = %q, want %q", i, msg.Text, want)
+		}
+	}
+}
+
+func TestStreamReadErrorIsReportedAfterRemainingOutputIsDrained(t *testing.T) {
+	readErr := errors.New("synthetic stdout read failure")
+	first, _ := json.Marshal(map[string]any{"type": "assistant", "message": map[string]any{
+		"role": "assistant", "content": []map[string]any{{"type": "text", "text": "before fault"}},
+	}})
+	remainder := bytes.Repeat([]byte("drain-me"), 64<<10)
+	fp := newFaultProc(append(first, '\n'), remainder, readErr)
+	drv := New(Options{DisablePermissions: true, PollInterval: 20 * time.Millisecond})
+	drv.spawn = func(context.Context, spawnSpec) (process, error) { return fp, nil }
+	defer drv.Close()
+
+	if _, err := drv.Start(context.Background(), attemptFor("w1/1", "task")); err != nil {
+		t.Fatal(err)
+	}
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 || cs[0].Status != adapter.StatusError {
+		t.Fatalf("completion = %+v, want one error", cs)
+	}
+	if !errors.Is(cs[0].Err, readErr) {
+		t.Fatalf("completion error = %v, want %v", cs[0].Err, readErr)
+	}
+	select {
+	case <-fp.r.drained:
+	default:
+		t.Fatal("stdout remainder was not drained after read error")
+	}
+}
+
+func TestResultOwnsCumulativeCostAndUsageAccounting(t *testing.T) {
+	fp, _ := newFakeProc()
+	drv := New(Options{DisablePermissions: true, PollInterval: 20 * time.Millisecond})
+	drv.spawn = fakeSpawn(fp)
+	defer drv.Close()
+
+	sess, err := drv.Start(context.Background(), attemptFor("w1/1", "task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Real assistant envelopes contain per-turn usage but no cost. Corral uses
+	// the result envelope's cumulative totals exactly once for budget accounting.
+	for _, turn := range []struct {
+		text   string
+		input  int
+		output int
+	}{{"working", 10, 2}, {"done", 30, 5}} {
+		fp.write(map[string]any{"type": "assistant", "message": map[string]any{
+			"role": "assistant", "content": []map[string]any{{"type": "text", "text": turn.text}},
+			"usage": map[string]any{"input_tokens": turn.input, "output_tokens": turn.output},
+		}})
+	}
+	fp.write(map[string]any{
+		"type": "result", "subtype": "success", "session_id": sess.ID(),
+		"total_cost_usd": 0.125,
+		"usage": map[string]any{
+			"input_tokens": 100, "output_tokens": 20,
+			"cache_creation_input_tokens": 30, "cache_read_input_tokens": 40,
+		},
+	})
+	fp.finish(nil)
+
+	cs := drainSteps(drv, 1)
+	if len(cs) != 1 || len(cs[0].Messages) != 2 {
+		t.Fatalf("completion = %+v", cs)
+	}
+	var cost float64
+	var tokens int
+	for _, msg := range cs[0].Messages {
+		cost += msg.Cost
+		tokens += msg.Tokens
+	}
+	if cost != 0.125 {
+		t.Errorf("summed cost = %v, want 0.125", cost)
+	}
+	if tokens != 190 {
+		t.Errorf("summed tokens = %d, want 190", tokens)
+	}
+	if cs[0].Messages[0].Cost != 0 || cs[0].Messages[0].Tokens != 0 {
+		t.Errorf("first assistant message duplicated cumulative accounting: %+v", cs[0].Messages[0])
+	}
+	if cs[0].Messages[1].Cost != 0.125 || cs[0].Messages[1].Tokens != 190 {
+		t.Errorf("final assistant accounting = %+v", cs[0].Messages[1])
 	}
 }
 

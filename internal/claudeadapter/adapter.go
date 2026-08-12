@@ -12,9 +12,11 @@ package claudeadapter
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -96,8 +98,8 @@ type attempt struct {
 	errMsg    string
 	exited    bool
 	exitErr   error
-	events    chan streamEvent
-	exitedCh  chan error // scanner -> watcher: the process Wait result
+	readErr   error
+	exitedCh  chan processExit // stream reader -> watcher after stdout is drained
 	cancel    context.CancelFunc
 
 	mu         sync.Mutex
@@ -171,8 +173,7 @@ func (d *Driver) Start(ctx context.Context, a adapter.Attempt) (adapter.Session,
 		sessionID: spec.sessionID,
 		launchID:  spec.sessionID,
 		cwd:       a.Cwd,
-		events:    make(chan streamEvent, 256),
-		exitedCh:  make(chan error, 1),
+		exitedCh:  make(chan processExit, 1),
 		cancel:    cancel,
 	}
 	d.attempts[a.ID] = at
@@ -297,24 +298,38 @@ func (at *attempt) cleanup() {
 	at.d.mu.Unlock()
 }
 
-// scan reads the claude stream-json output until EOF, dispatches each
-// event to the attempt, then reports the process exit to the watcher. The
-// exit is delivered through the watcher (not handled here) so the terminal
-// decision always sees the full transcript in order.
+type processExit struct {
+	waitErr error
+	readErr error
+}
+
+// scan reads arbitrary-size stream-json records and handles them inline. This
+// keeps transcript/result processing ordered and lossless without a bounded
+// event queue. On a read failure it continues draining stdout before Wait so a
+// child blocked on a full pipe cannot deadlock shutdown.
 func (d *Driver) scan(at *attempt) {
-	sc := bufio.NewScanner(at.proc.stdout())
-	for sc.Scan() {
-		var ev streamEvent
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
-			continue // startup noise / unknown line
+	r := bufio.NewReader(at.proc.stdout())
+	var readErr error
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			var ev streamEvent
+			if json.Unmarshal(line, &ev) == nil {
+				at.handleEvent(ev)
+			}
 		}
-		select {
-		case at.events <- ev:
-		default: // dropped; the process exit covers it
+		if err == nil {
+			continue
 		}
+		if !errors.Is(err, io.EOF) {
+			readErr = fmt.Errorf("read claude stream: %w", err)
+			_, _ = io.Copy(io.Discard, r)
+		}
+		break
 	}
+	exit := processExit{waitErr: at.proc.wait(), readErr: readErr}
 	select {
-	case at.exitedCh <- at.proc.wait():
+	case at.exitedCh <- exit:
 	default: // watcher already gone (driver closed)
 	}
 }
@@ -332,24 +347,8 @@ func (at *attempt) watch(ctx context.Context) {
 			return
 		case <-poll.C:
 			at.d.maybeComplete(context.Background(), at)
-		case ev := <-at.events:
-			at.handleEvent(ev)
-		case err := <-at.exitedCh:
-			at.drainEvents()
-			at.onExit(err)
-			return
-		}
-	}
-}
-
-// drainEvents processes every event queued ahead of the exit signal so the
-// terminal decision reflects the full transcript.
-func (at *attempt) drainEvents() {
-	for {
-		select {
-		case ev := <-at.events:
-			at.handleEvent(ev)
-		default:
+		case exit := <-at.exitedCh:
+			at.onExit(exit)
 			return
 		}
 	}
@@ -381,7 +380,7 @@ func (at *attempt) handleEvent(ev streamEvent) {
 		at.terminal = true
 		at.subtype = ev.Subtype
 		at.mu.Unlock()
-		at.d.maybeComplete(context.Background(), at)
+		at.applyResultAccounting(ev.TotalCostUSD, ev.Usage)
 	case "stream_error":
 		at.mu.Lock()
 		at.terminal = true
@@ -389,13 +388,12 @@ func (at *attempt) handleEvent(ev streamEvent) {
 			at.errMsg = ev.Error
 		}
 		at.mu.Unlock()
-		at.d.maybeComplete(context.Background(), at)
 	}
 }
 
 // onExit marks the process exit as the terminal event. It is the
 // reconciliation fallback when the result event was dropped.
-func (at *attempt) onExit(err error) {
+func (at *attempt) onExit(exit processExit) {
 	at.mu.Lock()
 	if at.stopped {
 		at.mu.Unlock()
@@ -403,7 +401,8 @@ func (at *attempt) onExit(err error) {
 	}
 	at.terminal = true
 	at.exited = true
-	at.exitErr = err
+	at.exitErr = exit.waitErr
+	at.readErr = exit.readErr
 	at.mu.Unlock()
 	at.d.maybeComplete(context.Background(), at)
 }
@@ -431,10 +430,7 @@ func (at *attempt) appendMessage(raw json.RawMessage, role string) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return
 	}
-	am := adapter.Message{Role: role, Finish: m.Stop, Cost: m.Cost}
-	if m.Usage != nil {
-		am.Tokens = m.Usage.InputTokens + m.Usage.OutputTokens
-	}
+	am := adapter.Message{Role: role, Finish: m.Stop}
 	for _, c := range m.Content {
 		var b contentBlock
 		if json.Unmarshal(c, &b) != nil {
@@ -450,6 +446,29 @@ func (at *attempt) appendMessage(raw json.RawMessage, role string) {
 	at.mu.Lock()
 	at.transcript = append(at.transcript, am)
 	at.mu.Unlock()
+}
+
+// applyResultAccounting stores Claude's cumulative result totals exactly once
+// on the final assistant message. The scheduler sums message accounting, so
+// copying per-turn assistant usage as well would double-count a session.
+func (at *attempt) applyResultAccounting(cost float64, usage *sdkUsage) {
+	if cost == 0 && usage == nil {
+		return
+	}
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	for i := len(at.transcript) - 1; i >= 0; i-- {
+		if at.transcript[i].Role == "assistant" {
+			at.transcript[i].Cost = cost
+			at.transcript[i].Tokens = usage.total()
+			return
+		}
+	}
+	at.transcript = append(at.transcript, adapter.Message{
+		Role:   "assistant",
+		Cost:   cost,
+		Tokens: usage.total(),
+	})
 }
 
 func (at *attempt) snapshot() []adapter.Message {
@@ -475,8 +494,17 @@ func (at *attempt) terminalStatus() (adapter.Status, bool) {
 	}
 	at.mu.Lock()
 	defer at.mu.Unlock()
+	if !at.exited {
+		return "", false
+	}
 	if !at.terminal {
 		return "", false
+	}
+	if at.readErr != nil {
+		return adapter.StatusError, true
+	}
+	if at.exitErr != nil {
+		return adapter.StatusError, true
 	}
 	if at.subtype == "success" {
 		return adapter.StatusIdle, true
@@ -491,6 +519,24 @@ func (at *attempt) terminalStatus() (adapter.Status, bool) {
 		return adapter.StatusError, true
 	}
 	return adapter.StatusIdle, true
+}
+
+func (at *attempt) completionError() error {
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	if at.readErr != nil {
+		return at.readErr
+	}
+	if at.errMsg != "" {
+		return errors.New(at.errMsg)
+	}
+	if at.exitErr != nil {
+		return at.exitErr
+	}
+	if at.subtype != "" && at.subtype != "success" {
+		return fmt.Errorf("claude result: %s", at.subtype)
+	}
+	return nil
 }
 
 // maybeComplete emits a completion exactly once per attempt, guarded
@@ -508,6 +554,7 @@ func (d *Driver) maybeComplete(ctx context.Context, at *attempt) {
 		SessionID: at.currentSessionID(),
 		Status:    status,
 		Messages:  at.snapshot(),
+		Err:       at.completionError(),
 	}
 	select {
 	case d.completions <- c:
@@ -661,26 +708,35 @@ func newUUID() string {
 // Claude Code stream-json protocol types.
 
 type streamEvent struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype"`
-	SessionID string          `json:"session_id"`
-	Message   json.RawMessage `json:"message"`
-	Result    string          `json:"result"`
-	Error     string          `json:"error"`
-	Event     json.RawMessage `json:"event"`
+	Type         string          `json:"type"`
+	Subtype      string          `json:"subtype"`
+	SessionID    string          `json:"session_id"`
+	Message      json.RawMessage `json:"message"`
+	Result       string          `json:"result"`
+	Error        string          `json:"error"`
+	Event        json.RawMessage `json:"event"`
+	TotalCostUSD float64         `json:"total_cost_usd"`
+	Usage        *sdkUsage       `json:"usage"`
 }
 
 type sdkMessage struct {
 	Role    string            `json:"role"`
 	Content []json.RawMessage `json:"content"`
-	Usage   *sdkUsage         `json:"usage"`
-	Cost    float64           `json:"cost"`
 	Stop    string            `json:"stop_reason"`
 }
 
 type sdkUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
+}
+
+func (u *sdkUsage) total() int {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens + u.OutputTokens + u.CacheCreationTokens + u.CacheReadTokens
 }
 
 type contentBlock struct {
