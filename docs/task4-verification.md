@@ -55,8 +55,9 @@ focused feedback; budgets bound retries; prose alone never completes work.
   intervention (used by later tasks).
 - `TestOpenCodeEvidenceGates` is deterministic because the gates grep for
   fixed markers the prompt demands, independent of model behavior.
-- Reviewer sessions are read-only (write tools removed, bash kept for
-  tests/diffs), poll the transcript to idle, and parse the verdict from the
-  last assistant message. The verdict format is fixed in the prompt:
+- Reviewer sessions are read-only (shell and write tools removed), review
+  recorded diffs and command results from the evidence prompt, poll the
+  transcript to idle, and parse the verdict from the last assistant message.
+  The verdict format is fixed in the prompt:
   `APPROVED`/`NOT_APPROVED` plus a `Note:` line; anything else fails the
   gate with a parse error.

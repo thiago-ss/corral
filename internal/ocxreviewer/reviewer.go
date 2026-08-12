@@ -48,10 +48,11 @@ func (o Options) poll() time.Duration {
 	return o.PollInterval
 }
 
-// reviewTools keeps reviewer sessions read-only: editing and other write
-// paths are removed while bash and read stay available so the reviewer can
-// inspect diffs and run tests, mirroring the corral-reviewer agent.
+// reviewTools keeps reviewer sessions read-only. The reviewer evaluates the
+// recorded diff, transcript, and check results included in its prompt; shell
+// access is disabled because it can mutate the attempt worktree.
 var reviewTools = map[string]bool{
+	"bash":        false,
 	"edit":        false,
 	"write":       false,
 	"apply_patch": false,

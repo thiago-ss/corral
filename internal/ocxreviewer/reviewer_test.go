@@ -241,6 +241,17 @@ func TestPromptForIncludesEvidence(t *testing.T) {
 	}
 }
 
+func TestReviewToolsAreReadOnly(t *testing.T) {
+	for _, name := range []string{"bash", "edit", "write", "apply_patch"} {
+		enabled, explicit := reviewTools[name]
+		if !explicit {
+			t.Errorf("%s tool has no explicit deny rule", name)
+		} else if enabled {
+			t.Errorf("%s tool enabled in read-only reviewer", name)
+		}
+	}
+}
+
 func TestOpenCodeReviewerLive(t *testing.T) {
 	livetest.SkipIfDisabled(t)
 	if _, err := exec.LookPath("opencode"); err != nil {
