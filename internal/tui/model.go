@@ -204,10 +204,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeList:
 			cmds = append(cmds, fetchRunsCmd(m))
 		case modeDetail, modeInspect:
-			if m.detail == nil || (!m.detail.Done && m.streamItems == nil && !m.streamConnecting) {
+			if m.detail == nil || (!m.runTerminal() && m.streamItems == nil && !m.streamConnecting) {
 				// Initial/full refresh and fallback polling while SSE is down.
 				cmds = append(cmds, fetchRunCmd(m))
-				if m.detail != nil && !m.detail.Done {
+				if m.detail != nil && !m.runTerminal() {
 					m.streamConnecting = true
 					m.streamAttempted = true
 					cmds = append(cmds, startEventStreamCmd(m))
@@ -257,7 +257,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if cmd := m.checkAttention(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			if !m.detail.Done && m.streamItems == nil && !m.streamConnecting && !m.streamAttempted {
+			if !m.runTerminal() && m.streamItems == nil && !m.streamConnecting && !m.streamAttempted {
 				m.streamConnecting = true
 				m.streamAttempted = true
 				cmds = append(cmds, startEventStreamCmd(m))
@@ -293,7 +293,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.item.err != nil {
 			m.stopEventStream()
 			m.status = "event stream unavailable; polling"
-			if m.detail != nil && !m.detail.Done {
+			if m.detail != nil && !m.runTerminal() {
 				return m, fetchRunCmd(m)
 			}
 			return m, nil
@@ -574,6 +574,10 @@ func (m *Model) stopEventStream() {
 	m.streamConnecting = false
 }
 
+func (m *Model) runTerminal() bool {
+	return m.detail != nil && (m.detail.Status == "completed" || m.detail.Status == "canceled")
+}
+
 func (m *Model) seedAttentionStates() {
 	if m.detail == nil {
 		return
@@ -614,7 +618,7 @@ func (m *Model) applyEvent(event EventView) bool {
 		}
 		// Attempt finalization is durable before the terminal/waiting run
 		// event. Refresh once here so transcript metadata and usage settle.
-		if m.detail.Done {
+		if m.runTerminal() {
 			m.stopEventStream()
 		}
 		return true

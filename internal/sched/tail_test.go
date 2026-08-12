@@ -63,3 +63,15 @@ func TestTailDoesNotHoldRunMutexWhileFetchingMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTailRejectsInvalidLineCount(t *testing.T) {
+	h := &RunHandle{}
+	if _, err := h.Tail(context.Background(), "", 100); err == nil {
+		t.Fatal("Tail accepted empty node ID")
+	}
+	for _, lines := range []int{-1, 0, 501} {
+		if _, err := h.Tail(context.Background(), "node", lines); err == nil {
+			t.Fatalf("Tail accepted lines=%d", lines)
+		}
+	}
+}

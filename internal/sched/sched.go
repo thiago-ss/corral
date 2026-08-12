@@ -979,9 +979,15 @@ func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) 
 }
 
 // Tail returns the last n transcript lines of the in-flight attempt of a
-// node, for live output in the companion TUI. Empty when the node has no
-// live session (e.g. inline check/gate nodes).
+// node, for live output in the companion TUI. It reports an error when the
+// node has no live session (e.g. inline check/gate nodes).
 func (h *RunHandle) Tail(ctx context.Context, id graph.NodeID, n int) ([]string, error) {
+	if id == "" {
+		return nil, fmt.Errorf("node required")
+	}
+	if n < 1 || n > 500 {
+		return nil, fmt.Errorf("lines must be between 1 and 500")
+	}
 	h.mu.Lock()
 	rec := h.sessions[id]
 	if rec == nil {

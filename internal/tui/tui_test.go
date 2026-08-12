@@ -543,6 +543,38 @@ func TestHealthyStreamPreventsOneSecondFullPolling(t *testing.T) {
 	}
 }
 
+func TestWaitingRunKeepsStreamForExternalResolution(t *testing.T) {
+	d := sampleDetail()
+	d.Status = "waiting"
+	d.Done = true
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.detail, m.mode, m.eventCursor = "run_1", d, modeDetail, 4
+	items := make(chan eventStreamItem)
+	m.streamItems = items
+	canceled := false
+	m.streamCancel = func() { canceled = true }
+	event := EventView{Seq: 5, RunID: "run_1", Type: "run", Payload: json.RawMessage(`{"status":"waiting"}`)}
+	_, cmd := m.Update(eventStreamItemMsg{runID: "run_1", items: items, item: eventStreamItem{event: &event}})
+	if canceled || m.streamItems == nil {
+		t.Fatal("waiting run stopped stream needed for later permission resolution")
+	}
+	if cmd == nil {
+		t.Fatal("waiting run did not keep stream listener")
+	}
+}
+
+func TestInitialWaitingRunStartsEventStream(t *testing.T) {
+	d := sampleDetail()
+	d.Status = "waiting"
+	d.Done = true
+	m := New(&fakeAPI{}, context.Background())
+	m.selectedID, m.mode = "run_1", modeDetail
+	_, cmd := m.Update(fetchRunMsg{runID: "run_1", detail: d})
+	if cmd == nil || !m.streamConnecting {
+		t.Fatal("initial waiting run did not start event stream")
+	}
+}
+
 func int64Ptr(v int64) *int64 { return &v }
 
 func TestFetchErrorShown(t *testing.T) {
