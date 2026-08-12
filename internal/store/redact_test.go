@@ -45,18 +45,18 @@ func TestSecretsNeverPersisted(t *testing.T) {
 	secret := "Bearer sk-verysecretkey1234567890abcdef"
 	ts := time.Now().UnixMilli()
 	if err := st.RecordAttempt(ctx, Attempt{
-		ID: "w1/1", RunID: "r1", NodeID: "w1", No: 1, Status: "done",
+		ID: "r1/w1/1", RunID: "r1", NodeID: "w1", No: 1, Status: "done",
 		Evidence: "verifier saw " + secret, FinishedAt: &ts,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordArtifact(ctx, Artifact{
-		RunID: "r1", AttemptID: "w1/1", NodeID: "w1", Name: "diff",
+		RunID: "r1", AttemptID: "r1/w1/1", NodeID: "w1", Name: "diff",
 		Hash: "h", Content: "output with " + secret,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendEvent(ctx, "r1", "w1", EventVerdict, "", "", "w1/1", `{"note":"`+secret+`"}`, time.Now()); err != nil {
+	if _, err := st.AppendEvent(ctx, "r1", "w1", EventVerdict, "", "", "r1/w1/1", `{"note":"`+secret+`"}`, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,7 @@ func TestSecretsNeverPersisted(t *testing.T) {
 	if strings.Contains(atts[0].Evidence, "sk-verysecretkey") {
 		t.Fatalf("evidence leaked secret: %q", atts[0].Evidence)
 	}
-	arts, _ := st.Artifacts(ctx, "r1", "w1/1")
+	arts, _ := st.Artifacts(ctx, "r1", "r1/w1/1")
 	if strings.Contains(arts[0].Content, "sk-verysecretkey") {
 		t.Fatalf("artifact leaked secret: %q", arts[0].Content)
 	}

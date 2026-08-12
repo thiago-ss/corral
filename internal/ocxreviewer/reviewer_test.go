@@ -90,7 +90,7 @@ func llmError(name string) []ocx.Message {
 func reviewReq(worktree string) verify.ReviewRequest {
 	return verify.ReviewRequest{
 		Attempt: adapter.Attempt{
-			ID:        "w1/1",
+			ID:        "run_1/w1/1",
 			NodeID:    "w1",
 			Objective: "create manifest.json with a name field",
 			Role:      "worker",

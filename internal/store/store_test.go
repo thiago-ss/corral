@@ -116,22 +116,22 @@ func TestAttemptsUniquePerNode(t *testing.T) {
 	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
-	a := Attempt{ID: "a/1", RunID: "r1", NodeID: "a", No: 1, Status: "running"}
+	a := Attempt{ID: "r1/a/1", RunID: "r1", NodeID: "a", No: 1, Status: "running"}
 	if err := st.RecordAttempt(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordAttempt(ctx, Attempt{ID: "a/2", RunID: "r1", NodeID: "a", No: 2, Status: "running"}); err != nil {
+	if err := st.RecordAttempt(ctx, Attempt{ID: "r1/a/2", RunID: "r1", NodeID: "a", No: 2, Status: "running"}); err != nil {
 		t.Fatal(err)
 	}
 	// Duplicate attempt number for the same node must fail.
-	if err := st.RecordAttempt(ctx, Attempt{ID: "a/2b", RunID: "r1", NodeID: "a", No: 2, Status: "running"}); err == nil {
+	if err := st.RecordAttempt(ctx, Attempt{ID: "r1/a/2b", RunID: "r1", NodeID: "a", No: 2, Status: "running"}); err == nil {
 		t.Fatal("duplicate (node, no) accepted")
 	}
 	atts, err := st.Attempts(ctx, "r1", "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(atts) != 2 || atts[0].ID != "a/1" || atts[1].ID != "a/2" {
+	if len(atts) != 2 || atts[0].ID != "r1/a/1" || atts[1].ID != "r1/a/2" {
 		t.Fatalf("attempts wrong: %+v", atts)
 	}
 }
@@ -220,12 +220,12 @@ func TestMarkInterrupted(t *testing.T) {
 	if err := st.CreateRun(ctx, "r1", testGraph(t), false, now()); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"a/1", "b/1"} {
-		if err := st.RecordAttempt(ctx, Attempt{ID: id, RunID: "r1", NodeID: string(id[0]), No: 1, Status: "running"}); err != nil {
+	for _, attempt := range []struct{ id, nodeID string }{{"r1/a/1", "a"}, {"r1/b/1", "b"}} {
+		if err := st.RecordAttempt(ctx, Attempt{ID: attempt.id, RunID: "r1", NodeID: attempt.nodeID, No: 1, Status: "running"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := st.RecordAttempt(ctx, Attempt{ID: "a/0", RunID: "r1", NodeID: "a", No: 0, Status: "done"}); err != nil {
+	if err := st.RecordAttempt(ctx, Attempt{ID: "r1/a/0", RunID: "r1", NodeID: "a", No: 0, Status: "done"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MarkInterrupted(ctx, "r1", "a"); err != nil {
@@ -233,12 +233,12 @@ func TestMarkInterrupted(t *testing.T) {
 	}
 	atts, _ := st.Attempts(ctx, "r1", "a")
 	for _, at := range atts {
-		if at.ID == "a/0" && at.Status != "done" {
+		if at.ID == "r1/a/0" && at.Status != "done" {
 			t.Fatalf("completed attempt flipped: %+v", at)
 		}
 	}
 	for _, at := range atts {
-		if at.ID == "a/1" && at.Status != "interrupted" {
+		if at.ID == "r1/a/1" && at.Status != "interrupted" {
 			t.Fatalf("running attempt not interrupted: %+v", at)
 		}
 	}

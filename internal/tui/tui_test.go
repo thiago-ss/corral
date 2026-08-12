@@ -70,8 +70,8 @@ func sampleDetail() *RunDetail {
 		}},
 		States: map[string]string{"w1": "done", "gate": "running", "m": "pending"},
 		Attempts: map[string][]AttemptView{
-			"w1":   {{ID: "w1/1", No: 1, Status: "done", SessionID: "ses_x", Worktree: "/tmp/wt/w1", Evidence: `{"exit":0}`}},
-			"gate": {{ID: "gate/1", No: 1, Status: "running"}},
+			"w1":   {{ID: "run_1/w1/1", No: 1, Status: "done", SessionID: "ses_x", Worktree: "/tmp/wt/w1", Evidence: `{"exit":0}`}},
+			"gate": {{ID: "run_1/gate/1", No: 1, Status: "running"}},
 		},
 		Events: []EventView{{Seq: 1, Type: "transition", NodeID: "w1", From: "pending", To: "done"}},
 	}

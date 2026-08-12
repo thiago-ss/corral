@@ -534,7 +534,7 @@ func (h *RunHandle) startAttempt(ctx context.Context, n *graph.Node) error {
 		return err
 	}
 	no++
-	attemptID := fmt.Sprintf("%s/%d", n.ID, no)
+	attemptID := fmt.Sprintf("%s/%s/%d", h.runID, n.ID, no)
 	switch n.Type {
 	case graph.NodeCheck:
 		return h.startCheck(ctx, n, attemptID, no, now)
