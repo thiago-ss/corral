@@ -134,6 +134,43 @@ func TestTokenBudgetBoundsRetries(t *testing.T) {
 	}
 }
 
+func TestPreAuthorizedGateStillRequiresApprovalAction(t *testing.T) {
+	st := newStore(t)
+	clk := fakeClock()
+	drv := sched.NewFakeDriver(clk, scriptsFor("w"))
+	ver := sched.NewFakeVerifier(nil, sched.Verdict{Pass: true})
+	s := newSched(t, st, drv, ver, clk, sched.Options{Concurrency: 1})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		agent("w"),
+		{ID: "gate", Type: graph.NodeHuman, Objective: "approve", Priority: graph.PriorityNormal, DependsOn: []graph.NodeID{"w"}},
+	}}
+	h, err := s.Create(context.Background(), "run-autoapprove", g, sched.CreateOptions{AutoApproveGates: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive(t, h, clk, 100)
+	if h.Done() {
+		t.Fatal("pre-authorized run bypassed its human gate")
+	}
+	if st2, _ := h.State("gate"); st2 != graph.StateRunning {
+		t.Fatalf("gate state = %s, want running until orchestrator approval", st2)
+	}
+	if err := h.ApproveNode(context.Background(), "gate"); err != nil {
+		t.Fatal(err)
+	}
+	drive(t, h, clk, 100)
+	if !h.Done() {
+		t.Fatal("pre-authorized run did not settle after approval action")
+	}
+	r, err := st.Run(context.Background(), "run-autoapprove")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "completed" {
+		t.Fatalf("run status = %s, want completed", r.Status)
+	}
+}
+
 func TestCheckNodeRunsCommandAndRetries(t *testing.T) {
 	st := newStore(t)
 	clk := fakeClock()

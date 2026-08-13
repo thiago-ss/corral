@@ -21,6 +21,14 @@ type SessionStatus struct {
 	Next    int    `json:"next"`
 }
 
+// PermissionRequest is an unresolved OpenCode permission request. The
+// global permission endpoint is durable, so adapters can reconcile requests
+// that were emitted while the SSE stream was disconnected.
+type PermissionRequest struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionID"`
+}
+
 type FileDiff struct {
 	File      string `json:"file"`
 	Patch     string `json:"patch"`
@@ -40,6 +48,35 @@ type TokenCount struct {
 	} `json:"cache"`
 }
 
+// MessageSummary is role-dependent on the OpenCode wire: user messages use
+// an object containing diffs, while compacted assistant messages use a bool.
+// Keeping both shapes decodable prevents one compacted assistant message from
+// making the entire transcript unreadable.
+type MessageSummary struct {
+	Title     string     `json:"title"`
+	Body      string     `json:"body"`
+	Diffs     []FileDiff `json:"diffs"`
+	Compacted bool       `json:"-"`
+}
+
+func (s *MessageSummary) UnmarshalJSON(data []byte) error {
+	var compacted bool
+	if err := json.Unmarshal(data, &compacted); err == nil {
+		s.Compacted = compacted
+		s.Title = ""
+		s.Body = ""
+		s.Diffs = nil
+		return nil
+	}
+	type summary MessageSummary
+	var decoded summary
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*s = MessageSummary(decoded)
+	return nil
+}
+
 type MessageInfo struct {
 	ID        string  `json:"id"`
 	Role      string  `json:"role"`
@@ -52,12 +89,8 @@ type MessageInfo struct {
 	Cost      float64 `json:"cost"`
 	Tokens    TokenCount
 	Error     *json.RawMessage `json:"error"`
-	Summary   *struct {
-		Title string     `json:"title"`
-		Body  string     `json:"body"`
-		Diffs []FileDiff `json:"diffs"`
-	} `json:"summary"`
-	Time struct {
+	Summary   *MessageSummary  `json:"summary"`
+	Time      struct {
 		Created   int64  `json:"created"`
 		Completed *int64 `json:"completed"`
 	} `json:"time"`

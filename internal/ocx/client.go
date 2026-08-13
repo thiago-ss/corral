@@ -73,7 +73,7 @@ func (c *Client) CreateSession(ctx context.Context, title string) (Session, erro
 }
 
 func (c *Client) PromptAsync(ctx context.Context, sid, text, model string) error {
-	return c.PromptAsyncWithTools(ctx, sid, text, model, nil)
+	return c.promptAsync(ctx, sid, text, model, "", nil)
 }
 
 // PromptAsyncWithTools sends an async prompt with an optional tool
@@ -81,11 +81,39 @@ func (c *Client) PromptAsync(ctx context.Context, sid, text, model string) error
 // session so the agent cannot call them (e.g. planner sessions get no
 // bash/edit).
 func (c *Client) PromptAsyncWithTools(ctx context.Context, sid, text, model string, tools map[string]bool) error {
+	return c.promptAsync(ctx, sid, text, model, "", tools)
+}
+
+// PromptAsyncAgent sends an async prompt running under a named agent
+// (e.g. "corral-orchestrator"), so the session inherits that agent's
+// system prompt and tool permissions.
+func (c *Client) PromptAsyncAgent(ctx context.Context, sid, text, model, agent string) error {
+	return c.promptAsync(ctx, sid, text, model, agent, nil)
+}
+
+// PromptAsyncAgentWithTools is PromptAsyncAgent plus a tool allowlist.
+func (c *Client) PromptAsyncAgentWithTools(ctx context.Context, sid, text, model, agent string, tools map[string]bool) error {
+	return c.promptAsync(ctx, sid, text, model, agent, tools)
+}
+
+// promptAsync is the shared prompt_async caller; agent and tools are
+// optional session overrides.
+func (c *Client) promptAsync(ctx context.Context, sid, text, model, agent string, tools map[string]bool) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	if model != "" {
-		body["model"] = model
+		providerID, modelID, ok := strings.Cut(model, "/")
+		if !ok || strings.TrimSpace(providerID) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("model %q must use provider/model format", model)
+		}
+		body["model"] = map[string]string{
+			"providerID": providerID,
+			"modelID":    modelID,
+		}
+	}
+	if agent != "" {
+		body["agent"] = agent
 	}
 	if tools != nil {
 		body["tools"] = tools
@@ -121,10 +149,21 @@ func (c *Client) Abort(ctx context.Context, sid string) error {
 	return err
 }
 
-// RespondPermission answers a pending permission request.
-func (c *Client) RespondPermission(ctx context.Context, sid, permissionID, response string) error {
-	_, err := c.do(ctx, http.MethodPost, "/session/"+sid+"/permissions/"+permissionID,
-		url.Values{"directory": {c.dir}}, map[string]any{"response": response}, nil)
+// PendingPermissions returns every unresolved permission request visible in
+// this client's directory. Unlike the event stream, this endpoint can
+// reconcile requests created during a disconnect.
+func (c *Client) PendingPermissions(ctx context.Context) ([]PermissionRequest, error) {
+	var requests []PermissionRequest
+	_, err := c.do(ctx, http.MethodGet, "/permission",
+		url.Values{"directory": {c.dir}}, nil, &requests)
+	return requests, err
+}
+
+// RespondPermission answers a pending permission request using OpenCode's
+// current permission API. reply is one of "once", "always", or "reject".
+func (c *Client) RespondPermission(ctx context.Context, permissionID, reply string) error {
+	_, err := c.do(ctx, http.MethodPost, "/permission/"+permissionID+"/reply",
+		url.Values{"directory": {c.dir}}, map[string]any{"reply": reply}, nil)
 	return err
 }
 

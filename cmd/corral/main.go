@@ -5,6 +5,7 @@
 //	corral init              one-command local initialization
 //	corral doctor            environment and daemon checks
 //	corral export <runID>    full audit export of a run
+//	corral worktrees         list attempt worktrees; --prune drops safe ones
 package main
 
 import (
@@ -35,6 +36,7 @@ import (
 	"corral/internal/daemon"
 	"corral/internal/ocx"
 	"corral/internal/ocxadapter"
+	"corral/internal/ocxreviewer"
 	"corral/internal/sched"
 	"corral/internal/spike"
 	"corral/internal/store"
@@ -61,7 +63,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: corral <daemon|tui|init|doctor|export> [flags]")
+		return fmt.Errorf("usage: corral <daemon|tui|init|doctor|export|worktrees> [flags]")
 	}
 	switch args[0] {
 	case "update":
@@ -94,8 +96,14 @@ func run(args []string) error {
 			out = args[3]
 		}
 		return exportCmd(args[1], out)
+	case "worktrees":
+		fs := flag.NewFlagSet("worktrees", flag.ExitOnError)
+		prune := fs.Bool("prune", false, "prune clean worktrees whose branch was merged or removed")
+		stale := fs.Duration("stale", 0, "with --prune, also prune worktrees idle longer than this (e.g. 24h, 72h)")
+		fs.Parse(args[1:])
+		return worktreesCmd(*prune, *stale)
 	default:
-		return fmt.Errorf("unknown command %q (try: daemon, tui, up, init, doctor, export, update)", args[0])
+		return fmt.Errorf("unknown command %q (try: daemon, tui, up, init, doctor, export, update, worktrees)", args[0])
 	}
 }
 
@@ -124,7 +132,7 @@ func daemonCmd(port int, apiKey string) error {
 	// restart it on the same URL without breaking the adapter clients.
 	servePort := freePort()
 	var ocMu sync.Mutex
-	ocServer, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
+	ocServer, err := spike.StartServerWithConfig(ctx, dir, servePort, os.Stderr, assets.OpenCodeConfigJSON)
 	if err != nil {
 		return fmt.Errorf("start opencode server: %w", err)
 	}
@@ -143,7 +151,7 @@ func daemonCmd(port int, apiKey string) error {
 				return
 			}
 			time.Sleep(2 * time.Second)
-			ns, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
+			ns, err := spike.StartServerWithConfig(ctx, dir, servePort, os.Stderr, assets.OpenCodeConfigJSON)
 			if err != nil {
 				log.Printf("opencode server restart failed: %v", err)
 				return
@@ -170,10 +178,13 @@ func daemonCmd(port int, apiKey string) error {
 	wtm := worktree.NewManager(dir)
 	eng := verify.New(dir)
 	eng.Runner = verify.ExecRunner{}
-	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{
-		Concurrency: 4, Worktrees: wtm,
-	})
+	eng.Reviewer = ocxreviewer.New(oc, ocxreviewer.Options{Model: reviewerModel()})
+	opts := schedOpts(wtm)
+	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, opts)
+	log.Printf("run safeguards: breaker %d failures per %s; run budget %d tokens / $%.2f",
+		opts.BreakerMaxFailures, opts.BreakerWindow, opts.RunMaxTokens, opts.RunMaxCost)
 	d := daemon.New(st, s, daemon.NewOpenCodePlanner(oc, "", planTimeout()), dir, apiKey)
+	defer d.Close()
 	if err := d.Resume(ctx); err != nil {
 		log.Printf("resume: %v", err)
 	}
@@ -218,7 +229,9 @@ func tuiCmd() error {
 	client := tui.NewClient(base, key)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	p := tea.NewProgram(tui.New(client, ctx), tea.WithAltScreen())
+	model := tui.New(client, ctx)
+	model.EnableAttention()
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
@@ -239,6 +252,48 @@ func planTimeout() time.Duration {
 		}
 	}
 	return 5 * time.Minute
+}
+
+// reviewerModel overrides the reviewer session model; override with
+// CORRAL_REVIEWER_MODEL ("" = the OpenCode server default).
+func reviewerModel() string {
+	return os.Getenv("CORRAL_REVIEWER_MODEL")
+}
+
+// schedOpts returns the daemon scheduler options: the fixed
+// concurrency/worktree wiring plus run-level safeguards with defaults
+// that env vars override (a value of 0 disables a safeguard).
+func schedOpts(wtm *worktree.Manager) sched.Options {
+	return sched.Options{
+		Concurrency:        4,
+		Worktrees:          wtm,
+		BreakerMaxFailures: intEnv("CORRAL_BREAKER_MAX_FAILURES", 5),
+		BreakerWindow:      time.Duration(intEnv("CORRAL_BREAKER_WINDOW", 900)) * time.Second,
+		RunMaxTokens:       intEnv("CORRAL_RUN_MAX_TOKENS", 1_000_000),
+		RunMaxCost:         floatEnv("CORRAL_RUN_MAX_COST", 100),
+	}
+}
+
+// intEnv returns the named env var as an int, or def when unset or
+// unparsable.
+func intEnv(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// floatEnv returns the named env var as a float64, or def when unset or
+// unparsable.
+func floatEnv(name string, def float64) float64 {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // statusCmd lists runs through the daemon (the TUI shows the same data).
@@ -401,7 +456,9 @@ func initCmd(wantDir string) error {
 		}
 		fmt.Println("api key written:", keyFile)
 	}
-	cfg := map[string]any{"dir": dir, "apiKey": key, "daemonURL": daemonURL()}
+	// Keep the bearer token only in the mode-0600 api.key file. Config is
+	// project-readable metadata and must never duplicate authentication data.
+	cfg := map[string]any{"dir": dir, "daemonURL": daemonURL()}
 	if err := writeJSONFile(filepath.Join(corralDir, "config.json"), cfg); err != nil {
 		return err
 	}
@@ -434,7 +491,8 @@ func installPlugin(dir string) error {
 
 // installAgentConfig merges the corral agents (planner, orchestrator,
 // worker, reviewer, merger) into the project's opencode.json, preserving
-// any existing configuration. Existing agent entries are left untouched.
+// unrelated configuration. Managed agent definitions are refreshed on every
+// init so an older permissive policy cannot bypass current role boundaries.
 func installAgentConfig(dir string) error {
 	cfgPath := filepath.Join(dir, "opencode.json")
 	existing := map[string]any{}
@@ -458,9 +516,14 @@ func installAgentConfig(dir string) error {
 		existingAgents = map[string]any{}
 	}
 	for name, def := range agents {
-		if _, ok := existingAgents[name]; !ok {
-			existingAgents[name] = def
+		// Model selection is a safe user customization. All authority-bearing
+		// fields (permission/tools/mode) come from the embedded definition.
+		if current, ok := existingAgents[name].(map[string]any); ok {
+			if model, ok := current["model"]; ok {
+				def.(map[string]any)["model"] = model
+			}
 		}
+		existingAgents[name] = def
 	}
 	existing["agent"] = existingAgents
 	return writeJSONFile(cfgPath, existing)
@@ -519,7 +582,11 @@ func doctorWithURL(wantDir, url string) error {
 }
 
 func exportCmd(runID, outFile string) error {
-	client := tui.NewClient(daemonURL(), os.Getenv("CORRAL_DAEMON_KEY"))
+	key, err := readKey(dirOf(""))
+	if err != nil {
+		return err
+	}
+	client := tui.NewClient(daemonURL(), key)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var payload json.RawMessage
@@ -537,8 +604,66 @@ func exportCmd(runID, outFile string) error {
 		fmt.Printf("audit export written to %s\n", outFile)
 		return nil
 	}
-	_, err := os.Stdout.Write(pretty.Bytes())
+	_, err = os.Stdout.Write(pretty.Bytes())
 	return err
+}
+
+// worktreesCmd lists the attempt worktrees kept after failed attempts
+// and, with --prune, removes clean ones that are safe to drop (merged or
+// removed branches, plus stale ones beyond --stale). Dirty worktrees and
+// the main checkout are never touched.
+func worktreesCmd(prune bool, stale time.Duration) error {
+	return worktreesCmdWithDir(dirOf(""), prune, stale)
+}
+
+func worktreesCmdWithDir(dir string, prune bool, stale time.Duration) error {
+	wtm := worktree.NewManager(dir)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if prune {
+		removed, err := wtm.Prune(ctx, stale, time.Now())
+		if err != nil {
+			return err
+		}
+		if len(removed) == 0 {
+			fmt.Println("nothing to prune")
+			return nil
+		}
+		for _, p := range removed {
+			fmt.Println("pruned", p)
+		}
+		return nil
+	}
+	infos, err := wtm.List(ctx)
+	if err != nil {
+		return err
+	}
+	if len(infos) == 0 {
+		fmt.Println("no attempt worktrees")
+		return nil
+	}
+	for _, info := range infos {
+		var marks []string
+		if info.Dirty {
+			marks = append(marks, "dirty")
+		}
+		if info.Locked {
+			marks = append(marks, "locked")
+		}
+		mark := ""
+		if len(marks) > 0 {
+			mark = " " + strings.Join(marks, ",")
+		}
+		fmt.Printf("%-42s %-28s %-7s %s%s\n", info.Path, info.Branch, shortHead(info.Head), info.Mtime.Format("2006-01-02 15:04"), mark)
+	}
+	return nil
+}
+
+func shortHead(h string) string {
+	if len(h) > 7 {
+		return h[:7]
+	}
+	return h
 }
 
 func versionAtLeast(v, min string) bool {

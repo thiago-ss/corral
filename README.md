@@ -86,8 +86,10 @@ Inside OpenCode:
 1. Switch to `corral-planner` and ask: `plan a graph to <your goal>`.
 2. Review the returned graph.
 3. Switch to `corral-orchestrator` and ask it to start that graph.
-4. Follow progress with `corral_status`; approve, reject, retry, cancel, or
-   steer nodes when needed.
+4. Follow progress with `corral_status` / `corral_watch`; approve, reject,
+   retry, cancel, or steer nodes when needed. Trusted operator API clients may
+   set `autoApproveGates` when creating a run; model agents cannot grant that
+   authority to themselves.
 
 Or follow the same run from the terminal:
 
@@ -99,22 +101,28 @@ corral tui
   <a href="docs/assets/tui.svg"><picture><source media="(max-width: 900px)" srcset="docs/assets/tui-mobile.svg"><img src="docs/assets/tui.svg" alt="Corral TUI inspecting a completed attempt, its worktree, command gate, and exit evidence" width="960"></picture></a>
 </div>
 
-The TUI exposes the graph, node states, attempts, sessions, worktrees, evidence,
-and operator actions. Worker edits stay in attempt worktrees; initialization
-itself may add the OpenCode tool and agent config to your checkout.
+The TUI follows durable server-sent run events, falls back to polling after a
+stream failure, and exposes graph state, live transcript tails, budget usage,
+attempts, sessions, worktrees, evidence, permissions, and operator actions. It
+can raise desktop attention when a gate needs approval or a node fails. Worker
+edits stay in attempt worktrees; initialization itself may add the OpenCode tool
+and agent config to your checkout.
 
 ## What counts as evidence
 
-Corral currently wires three completion paths:
+Corral currently wires four completion paths:
 
 - **Command:** run an argv-style command in the attempt worktree and require
   exit code `0`.
 - **JSON Schema:** validate a declared JSON artifact against a schema.
 - **Default diff:** when no gate is declared, require at least one file diff
   reported by the driver. Prose alone fails.
-
-The graph schema also contains a reviewer-gate seam, but the production daemon
-does not wire a reviewer implementation yet.
+- **Reviewer:** a read-only OpenCode session reviews the attempt's evidence —
+  objective, prior feedback, transcript, the recorded diff artifact, and check
+  results — and must return exactly `APPROVED` or `CHANGES_REQUESTED`, followed
+  by a required `Note:` line. A change request returns its note as focused
+  retry feedback. Set `CORRAL_REVIEWER_MODEL` to a `provider/model` value to
+  use a specific model for review sessions.
 
 ## Proof, not promises
 
@@ -156,8 +164,10 @@ evidence remain stored when an attempt retries.
 - **Landing:** merge nodes commit accepted worktree changes, merge branches with
   `--no-ff`, run their post-merge command, and prune consumed worktrees.
 
-OpenCode is the implemented driver. The generic `adapter.Driver` interface is
-the seam for future executors.
+OpenCode is the production-wired driver. A self-contained Claude Code adapter
+implements the same contract, including scoped permission mediation, but is not
+yet selected by `corral daemon`. The generic `adapter.Driver` interface remains
+the seam for additional executors.
 
 ## Operations
 
@@ -168,14 +178,39 @@ the seam for future executors.
 | `corral doctor` | Check OpenCode, Git, daemon, plugin, and config |
 | `corral update` | Install a newer GitHub release after a sanity check |
 | `corral export <runID>` | Print the full audit export |
+| `corral worktrees` | List attempt worktrees; `--prune` removes clean merged/removed and stale ones |
 
-`status`, `tui`, and `doctor` read the repository key automatically. Until the
-export command does the same, use:
+`status`, `tui`, `doctor`, and `export` read the repository key automatically.
+
+### Run-level safeguards
+
+The daemon ships with run-level safeguards enabled by default. Each is
+overridable via an environment variable; a value of `0` disables it. These are
+ceilings for runaway runs — normal runs should never hit them.
+
+| Variable | Default | Behavior |
+|---|---|---|
+| `CORRAL_BREAKER_MAX_FAILURES` | `5` | Circuit breaker: once `N` node failures occur within the window, the run stops starting new work; pending nodes are blocked (`reason: circuit breaker`) and an operator retry resets the breaker. |
+| `CORRAL_BREAKER_WINDOW` | `900` (seconds, 15 min) | Failures are counted within this rolling window. |
+| `CORRAL_RUN_MAX_TOKENS` | `1_000_000` | Run-level token budget, accumulated across all finished attempts; once exceeded, pending nodes are blocked (`reason: run budget exceeded`). |
+| `CORRAL_RUN_MAX_COST` | `100` (USD) | Run-level cost budget, accumulated across all finished attempts; once exceeded, pending nodes are blocked. |
+
+Example:
 
 ```sh
-CORRAL_DAEMON_KEY="$(cat .corral/api.key)" \
-  corral export <runID> > audit.json
+CORRAL_BREAKER_MAX_FAILURES=3 \
+CORRAL_BREAKER_WINDOW=600 \
+CORRAL_RUN_MAX_TOKENS=250000 \
+CORRAL_RUN_MAX_COST=50 \
+corral up
 ```
+
+`corral worktrees` works directly on git (no daemon, no key). It lists the
+worktrees kept after failed attempts — path, branch, HEAD, last-activity time,
+and dirty/locked markers — and with `--prune` removes clean ones that are safe
+to drop: branches already merged into the main checkout, and (with `--stale
+<duration>`, e.g. `24h`) worktrees idle longer than that. It never touches the
+main checkout; dirty, locked, and detached worktrees are left alone.
 
 ## Development
 
@@ -194,9 +229,11 @@ The core packages are deliberately small:
 | `internal/graph` | graph schema, validation, states, ready computation |
 | `internal/sched` | leases, priority, retries, gates, merge orchestration |
 | `internal/store` | SQLite event log, materialized nodes, attempts, artifacts |
-| `internal/verify` | command, JSON Schema, and diff evidence |
+| `internal/verify` | command, JSON Schema, diff, and reviewer evidence |
 | `internal/worktree` | branch/worktree lifecycle and diff artifacts |
 | `internal/ocxadapter` | OpenCode sessions and completion reconciliation |
+| `internal/claudeadapter` | standalone Claude Code sessions, usage, and permission mediation |
+| `internal/ocxreviewer` | OpenCode reviewer sessions for the reviewer gate |
 | `internal/daemon` | control API, planning, role routing, audit export |
 | `internal/tui` | terminal dashboard and operator controls |
 
@@ -205,9 +242,11 @@ Visual language, color roles, and asset rules live in the
 
 ## Scope
 
-Corral is currently local, single-machine, single-repository software with one
-implemented executor: OpenCode. Distributed workers, Codex/Claude drivers,
-interactive graph editing, and a web dashboard remain roadmap work.
+Corral is currently local, single-machine, single-repository software. OpenCode
+is the production-wired executor; the Claude Code adapter is available as a
+self-contained package but has no daemon selection/configuration path yet.
+Distributed workers, a Codex driver, interactive graph editing, and a web
+dashboard remain roadmap work.
 
 ## License
 

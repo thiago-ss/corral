@@ -71,6 +71,7 @@ func TestOpenAPIContract(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	s := sched.New(st, sched.NewFakeDriver(clock.Real{}, nil), &sched.EngineVerifier{Eng: verify.New(t.TempDir())}, clock.Real{}, sched.Options{})
 	d := daemon.New(st, s, nil, t.TempDir(), "")
+	t.Cleanup(d.Close)
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 
@@ -82,6 +83,7 @@ func TestOpenAPIContract(t *testing.T) {
 	paths, _ := doc["paths"].(map[string]any)
 	registered := []string{
 		"/api/health", "/api/plan", "/api/runs", "/api/runs/{id}",
+		"/api/runs/{id}/watch", "/api/runs/{id}/events", "/api/runs/{id}/tail",
 		"/api/runs/{id}/approve", "/api/runs/{id}/reject", "/api/runs/{id}/cancel",
 		"/api/runs/{id}/retry", "/api/runs/{id}/steer", "/api/runs/{id}/permission",
 		"/api/runs/{id}/export", "/doc",
@@ -151,6 +153,7 @@ func TestAuditExport(t *testing.T) {
 	eng := verify.New(workdir)
 	s := sched.New(st, drv, &sched.EngineVerifier{Eng: eng}, clock.Real{}, sched.Options{Concurrency: 2})
 	d := daemon.New(st, s, nil, workdir, "")
+	t.Cleanup(d.Close)
 	ctx := context.Background()
 	d.SetContext(ctx)
 	srv := httptest.NewServer(d.Handler())

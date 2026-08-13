@@ -10,7 +10,7 @@ import (
 // document and live responses against its schemas.
 const OpenAPI = `{
   "openapi": "3.0.3",
-  "info": {"title": "corral daemon API", "version": "0.8.0"},
+  "info": {"title": "corral daemon API", "version": "0.9.0"},
   "paths": {
     "/api/health": {
       "get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Health"}}}}}}
@@ -25,6 +25,12 @@ const OpenAPI = `{
     "/api/runs/{id}": {
       "get": {"responses": {"200": {"description": "run detail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunDetail"}}}}}}
     },
+    "/api/runs/{id}/watch": {
+      "get": {"parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "timeout", "in": "query", "schema": {"type": "integer"}}], "responses": {"200": {"description": "run snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WatchResponse"}}}}}}
+    },
+    "/api/runs/{id}/tail": {
+      "get": {"parameters": [{"name": "node", "in": "query", "required": true, "schema": {"type": "string", "maxLength": 256}}, {"name": "lines", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500, "default": 40}}], "responses": {"200": {"description": "live attempt tail", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Tail"}}}}, "400": {"description": "invalid node or line count"}, "404": {"description": "run not found"}, "409": {"description": "node has no live attempt"}}}
+    },
     "/api/runs/{id}/approve": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/reject": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/cancel": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
@@ -32,6 +38,17 @@ const OpenAPI = `{
     "/api/runs/{id}/steer": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/permission": {"post": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Ok"}}}}}}},
     "/api/runs/{id}/export": {"get": {"responses": {"200": {"description": "audit export", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Export"}}}}}}},
+    "/api/runs/{id}/events": {
+      "get": {
+        "parameters": [{"name": "after", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 0}, "description": "only emit durable events with seq greater than this cursor"}],
+        "responses": {
+          "200": {"description": "server-sent stream whose data field is a durable Event and whose id is Event.seq", "content": {"text/event-stream": {"schema": {"type": "string"}}}},
+          "400": {"description": "invalid cursor"},
+          "404": {"description": "run not found"},
+          "500": {"description": "event replay unavailable"}
+        }
+      }
+    },
     "/doc": {"get": {"responses": {"200": {"description": "openapi document"}}}}
   },
   "components": {
@@ -93,11 +110,18 @@ const OpenAPI = `{
         }
       },
       "Event": {
-        "type": "object", "required": ["seq", "type"],
+        "type": "object", "required": ["seq", "runID", "type", "createdAt"],
         "properties": {
-          "seq": {"type": "integer"}, "nodeID": {"type": "string"},
+          "seq": {"type": "integer"}, "runID": {"type": "string"}, "nodeID": {"type": "string"},
           "type": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"},
-          "attemptID": {"type": "string"}, "createdAt": {"type": "integer"}
+          "attemptID": {"type": "string"}, "payload": {}, "createdAt": {"type": "integer"}
+        }
+      },
+      "Tail": {
+        "type": "object", "required": ["node", "lines"],
+        "properties": {
+          "node": {"type": "string"},
+          "lines": {"type": "array", "items": {"type": "string"}}
         }
       },
       "Artifact": {
@@ -113,8 +137,20 @@ const OpenAPI = `{
         "properties": {
           "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
           "graph": {"$ref": "#/components/schemas/Graph"},
+          "autoApproveGates": {"type": "boolean"},
           "states": {"type": "object", "additionalProperties": {"type": "string"}},
           "attempts": {"type": "object", "additionalProperties": {"type": "array", "items": {"$ref": "#/components/schemas/Attempt"}}},
+          "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
+        }
+      },
+      "WatchResponse": {
+        "type": "object", "required": ["runID"],
+        "properties": {
+          "runID": {"type": "string"}, "status": {"type": "string"}, "done": {"type": "boolean"},
+          "autoApproveGates": {"type": "boolean"},
+          "states": {"type": "object", "additionalProperties": {"type": "string"}},
+          "gatesAwaitingApproval": {"type": "array", "items": {"type": "string"}},
+          "since": {"type": "integer"},
           "events": {"type": "array", "items": {"$ref": "#/components/schemas/Event"}}
         }
       },

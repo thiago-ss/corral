@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +10,34 @@ import (
 
 	"corral/internal/graph"
 )
+
+func TestRedactPreservesJSON(t *testing.T) {
+	in := `{"apiKey":"abcdef","nested":{"access_token":"tokensecret1"},"items":[{"client_secret":"hunter2hunter2"}],"authorization":"Bearer abcdefgh","aws_secret_access_key":"aws-secret-value","private_key":"private-key-value","accessKeySecret":"access-key-value","large":9007199254740993,"maxTokens":123,"tokenCount":4,"promptTokens":5,"completionTokens":6,"totalTokens":11,"cachedTokens":2,"cacheCreationTokens":1,"cacheReadTokens":2}`
+	got := Redact(in)
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("Redact returned invalid JSON: %q", got)
+	}
+	for _, secret := range []string{"abcdef", "tokensecret1", "hunter2hunter2", "abcdefgh", "aws-secret-value", "private-key-value", "access-key-value"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("Redact(%q) still contains %q: %q", in, secret, got)
+		}
+	}
+	if !strings.Contains(got, "9007199254740993") {
+		t.Fatalf("Redact changed exact JSON number: %q", got)
+	}
+	for _, accounting := range []string{`"maxTokens":123`, `"tokenCount":4`, `"promptTokens":5`, `"completionTokens":6`, `"totalTokens":11`, `"cachedTokens":2`, `"cacheCreationTokens":1`, `"cacheReadTokens":2`} {
+		if !strings.Contains(got, accounting) {
+			t.Fatalf("Redact changed non-secret accounting key %s: %q", accounting, got)
+		}
+	}
+}
+
+func TestRedactJSONScalarString(t *testing.T) {
+	got := Redact(`"Bearer sk-verysecretkey1234567890"`)
+	if strings.Contains(got, "verysecretkey") || !json.Valid([]byte(got)) {
+		t.Fatalf("Redact leaked scalar JSON secret or broke JSON: %q", got)
+	}
+}
 
 func TestRedact(t *testing.T) {
 	cases := []struct{ in, wantAbsent string }{
@@ -39,24 +68,24 @@ func TestSecretsNeverPersisted(t *testing.T) {
 	g := &graph.Graph{Nodes: []*graph.Node{{
 		ID: "w1", Type: graph.NodeAgent, Objective: "o", AcceptanceCriteria: []string{"c"},
 	}}}
-	if err := st.CreateRun(ctx, "r1", g, time.Now()); err != nil {
+	if err := st.CreateRun(ctx, "r1", g, false, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	secret := "Bearer sk-verysecretkey1234567890abcdef"
 	ts := time.Now().UnixMilli()
 	if err := st.RecordAttempt(ctx, Attempt{
-		ID: "w1/1", RunID: "r1", NodeID: "w1", No: 1, Status: "done",
+		ID: "r1/w1/1", RunID: "r1", NodeID: "w1", No: 1, Status: "done",
 		Evidence: "verifier saw " + secret, FinishedAt: &ts,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordArtifact(ctx, Artifact{
-		RunID: "r1", AttemptID: "w1/1", NodeID: "w1", Name: "diff",
+		RunID: "r1", AttemptID: "r1/w1/1", NodeID: "w1", Name: "diff",
 		Hash: "h", Content: "output with " + secret,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendEvent(ctx, "r1", "w1", EventVerdict, "", "", "w1/1", `{"note":"`+secret+`"}`, time.Now()); err != nil {
+	if _, err := st.AppendEvent(ctx, "r1", "w1", EventVerdict, "", "", "r1/w1/1", `{"note":"`+secret+`"}`, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +93,7 @@ func TestSecretsNeverPersisted(t *testing.T) {
 	if strings.Contains(atts[0].Evidence, "sk-verysecretkey") {
 		t.Fatalf("evidence leaked secret: %q", atts[0].Evidence)
 	}
-	arts, _ := st.Artifacts(ctx, "r1", "w1/1")
+	arts, _ := st.Artifacts(ctx, "r1", "r1/w1/1")
 	if strings.Contains(arts[0].Content, "sk-verysecretkey") {
 		t.Fatalf("artifact leaked secret: %q", arts[0].Content)
 	}

@@ -18,7 +18,8 @@ async function loadKey(): Promise<string> {
 }
 
 // Map the current OpenCode agent to a corral role for server-side
-// enforcement. Anything unknown falls back to operator (human).
+// enforcement. Unknown agents stay unprivileged; only non-model clients such
+// as the CLI/TUI may claim the operator role directly.
 const ROLE_MAP: Record<string, string> = {
   "corral-orchestrator": "orchestrator",
   "corral-planner": "planner",
@@ -29,7 +30,7 @@ const ROLE_MAP: Record<string, string> = {
 
 function roleFor(agent?: string): string {
   if (agent && agent in ROLE_MAP) return ROLE_MAP[agent]
-  return "operator"
+  return "unknown"
 }
 
 async function call(path: string, body?: unknown, role?: string) {
@@ -40,7 +41,7 @@ async function call(path: string, body?: unknown, role?: string) {
       method: body === undefined ? "GET" : "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Corral-Role": role ?? "operator",
+        "X-Corral-Role": role ?? "unknown",
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -67,14 +68,20 @@ export const plan = tool({
 
 export const start = tool({
   description: "Start a corral run from an approved graph.",
-  args: { graph: tool.schema.string().describe("Graph JSON (as returned by corral_plan)") },
+  args: {
+    graph: tool.schema.string().describe("Graph JSON (as returned by corral_plan)"),
+  },
   async execute(args, context) {
-    let graph: unknown
+    let parsed: unknown
     try {
-      graph = JSON.parse(args.graph)
+      parsed = JSON.parse(args.graph)
     } catch {
       return "error: graph is not valid JSON"
     }
+    const graph =
+      typeof parsed === "object" && parsed !== null && "graph" in parsed
+        ? (parsed as { graph: unknown }).graph
+        : parsed
     return call("/api/runs", { graph }, roleFor(context.agent))
   },
 })
@@ -86,6 +93,22 @@ export const status = tool({
   },
   async execute(args, context) {
     return call(args.runID ? `/api/runs/${args.runID}` : "/api/runs", undefined, roleFor(context.agent))
+  },
+})
+
+export const watch = tool({
+  description:
+    "Watch a corral run and block until its state changes (new events, a human gate awaiting approval, or completion) or the timeout elapses. Drive the run loop by calling this repeatedly and passing the previous response's `since` cursor back. `gatesAwaitingApproval` lists human gates parked in running waiting for a decision: if the response's `autoApproveGates` is true the run is pre-authorized and you should approve each gate via corral_approve; otherwise never approve them yourself — report them to the user and keep watching until they resolve.",
+  args: {
+    runID: tool.schema.string(),
+    since: tool.schema.number().optional().describe("Event cursor; only return events after this"),
+    timeout: tool.schema.number().optional().describe("Block for up to this many seconds (default 60, max 120)"),
+  },
+  async execute(args, context) {
+    const q = new URLSearchParams()
+    if (args.since !== undefined) q.set("since", String(args.since))
+    if (args.timeout !== undefined) q.set("timeout", String(args.timeout))
+    return call(`/api/runs/${args.runID}/watch?${q}`, undefined, roleFor(context.agent))
   },
 })
 

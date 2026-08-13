@@ -75,6 +75,28 @@ func TestValidateRejectsDuplicateAndEmptyIDs(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnknownAgentRoleAndUnsafeScope(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		role  string
+		scope []string
+	}{
+		{"unknown role", "admin", []string{"a.txt"}},
+		{"absolute scope", "worker", []string{"/tmp/a.txt"}},
+		{"parent scope", "worker", []string{"../a.txt"}},
+		{"wildcard path", "worker", []string{"src/*.go"}},
+		{"reviewer scope", "reviewer", []string{"a.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := agent("a")
+			n.Role, n.WriteScope = tc.role, tc.scope
+			if err := Validate(&Graph{Nodes: []*Node{n}}); err == nil {
+				t.Fatal("unsafe agent accepted")
+			}
+		})
+	}
+}
+
 func TestValidateRejectsMissingAcceptanceCriteria(t *testing.T) {
 	n := agent("a")
 	n.AcceptanceCriteria = nil

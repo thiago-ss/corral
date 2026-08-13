@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +23,6 @@ import (
 )
 
 const (
-	resultsBuffer    = 32
 	runStatusDone    = "completed"
 	runStatusWaiting = "waiting"
 )
@@ -85,6 +85,11 @@ type Scheduler struct {
 	ver   Verifier
 	clk   clock.Clock
 	opts  Options
+
+	completionMu sync.Mutex
+	owners       map[string]*RunHandle
+	pending      map[*RunHandle][]Result
+	orphans      map[string][]Result
 }
 
 func New(st *store.Store, drv adapter.Driver, ver Verifier, clk clock.Clock, opts Options) *Scheduler {
@@ -94,7 +99,11 @@ func New(st *store.Store, drv adapter.Driver, ver Verifier, clk clock.Clock, opt
 	if opts.LeaseTTL <= 0 {
 		opts.LeaseTTL = 30 * time.Second
 	}
-	return &Scheduler{store: st, drv: drv, ver: ver, clk: clk, opts: opts}
+	return &Scheduler{
+		store: st, drv: drv, ver: ver, clk: clk, opts: opts,
+		owners: map[string]*RunHandle{}, pending: map[*RunHandle][]Result{},
+		orphans: map[string][]Result{},
+	}
 }
 
 type sessionRec struct {
@@ -104,6 +113,8 @@ type sessionRec struct {
 	sess          adapter.Session
 	deadline      time.Time
 	budgeted      bool // time budget active
+	budgetPaused  bool
+	budgetRemain  time.Duration
 	abortIsBudget bool // abort was initiated by the scheduler (budget), not operator
 	worktree      string
 	branch        string
@@ -126,20 +137,34 @@ type RunHandle struct {
 	runCost   float64
 	runTokens int
 	breaker   bool
-	results   chan Result
+	results   []Result
 	holder    string
 	done      bool
 	stepCount int64
 	started   time.Time
 }
 
+// CreateOptions carries per-run creation policies (extended without
+// breaking existing callers, which keep compiling with no options).
+type CreateOptions struct {
+	// AutoApproveGates marks the run as pre-authorized: the orchestrator
+	// agent approves human gates itself as they are reached, without
+	// waiting for the operator. When false the orchestrator must never
+	// approve gates on its own.
+	AutoApproveGates bool
+}
+
 // Create starts a new run for g.
-func (s *Scheduler) Create(ctx context.Context, runID string, g *graph.Graph) (*RunHandle, error) {
+func (s *Scheduler) Create(ctx context.Context, runID string, g *graph.Graph, opts ...CreateOptions) (*RunHandle, error) {
 	if err := graph.Validate(g); err != nil {
 		return nil, err
 	}
+	var o CreateOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	now := s.clk.Now()
-	if err := s.store.CreateRun(ctx, runID, g, now); err != nil {
+	if err := s.store.CreateRun(ctx, runID, g, o.AutoApproveGates, now); err != nil {
 		return nil, err
 	}
 	return s.newHandle(ctx, runID, g, now)
@@ -220,26 +245,49 @@ func (s *Scheduler) Load(ctx context.Context, runID string) (*RunHandle, error) 
 		retryAt:   map[graph.NodeID]time.Time{},
 		age:       map[graph.NodeID]int{},
 		feedback:  map[graph.NodeID]string{},
-		results:   make(chan Result, resultsBuffer),
 		holder:    fmt.Sprintf("corral-%d", now.UnixNano()),
 		started:   now,
 	}
+	for _, n := range r.Graph.Nodes {
+		cost, tokens, err := s.store.NodeCost(ctx, runID, string(n.ID))
+		if err != nil {
+			return nil, err
+		}
+		h.runCost += cost
+		h.runTokens += tokens
+	}
 	for _, ev := range events {
-		if ev.Type == store.EventRetry {
-			var p struct {
-				ReadyAt int64 `json:"readyAt"`
-			}
-			if json.Unmarshal(ev.Payload, &p) == nil && p.ReadyAt > 0 {
-				h.retryAt[graph.NodeID(ev.NodeID)] = time.UnixMilli(p.ReadyAt)
-			}
+		if operatorRetryEvent(ev) {
+			// Operator retry is the durable circuit-breaker reset marker.
+			h.failures = nil
+		}
+		if ev.Type == store.EventTransition && ev.To == graph.StateFailed {
+			h.failures = append(h.failures, time.UnixMilli(ev.CreatedAt))
+		}
+	}
+	for _, n := range r.Graph.Nodes {
+		state, _ := tr.State(n.ID)
+		if state != graph.StateRetryWait {
+			continue
+		}
+		if readyAt, ok := retryReadyAt(events, n.ID); ok {
+			h.retryAt[n.ID] = readyAt
 		}
 	}
 	return h, nil
 }
 
-// retryReadyAt finds the scheduled retry time from retry events.
+func operatorRetryEvent(ev store.Event) bool {
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	return json.Unmarshal(ev.Payload, &payload) == nil && payload.Reason == "operator retry"
+}
+
+// retryReadyAt finds the latest scheduled retry time from retry events.
 func retryReadyAt(events []store.Event, nodeID graph.NodeID) (time.Time, bool) {
-	for _, ev := range events {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
 		if graph.NodeID(ev.NodeID) != nodeID || ev.Type != store.EventRetry {
 			continue
 		}
@@ -268,10 +316,64 @@ func (s *Scheduler) newHandle(ctx context.Context, runID string, g *graph.Graph,
 		retryAt:   map[graph.NodeID]time.Time{},
 		age:       map[graph.NodeID]int{},
 		feedback:  map[graph.NodeID]string{},
-		results:   make(chan Result, resultsBuffer),
 		holder:    fmt.Sprintf("corral-%d", now.UnixNano()),
 		started:   now,
 	}, nil
+}
+
+func completionResult(c adapter.Completion) Result {
+	return Result{
+		AttemptID: c.AttemptID, SessionID: c.SessionID, Status: c.Status,
+		Messages: c.Messages, Err: c.Err, Budget: c.Budget,
+	}
+}
+
+// registerAttempt binds a provider completion to its owning run. A different
+// run may drain the shared driver between Start returning and this call, so
+// completions observed in that window are retained as orphans and claimed now.
+func (s *Scheduler) registerAttempt(h *RunHandle, attemptID string) {
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	s.owners[attemptID] = h
+	if queued := s.orphans[attemptID]; len(queued) > 0 {
+		s.pending[h] = append(s.pending[h], queued...)
+		delete(s.orphans, attemptID)
+	}
+}
+
+func (s *Scheduler) unregisterAttempt(h *RunHandle, attemptID string) {
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	if s.owners[attemptID] == h {
+		delete(s.owners, attemptID)
+	}
+}
+
+// collectCompletions drains the shared provider once and routes every result
+// to its owning RunHandle. Calls from concurrent run loops are serialized.
+func (s *Scheduler) collectCompletions(ctx context.Context, now time.Time) {
+	stepper, ok := s.drv.(adapter.Stepper)
+	if !ok {
+		return
+	}
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	for _, completion := range stepper.Step(ctx, now) {
+		result := completionResult(completion)
+		if owner := s.owners[completion.AttemptID]; owner != nil {
+			s.pending[owner] = append(s.pending[owner], result)
+		} else {
+			s.orphans[completion.AttemptID] = append(s.orphans[completion.AttemptID], result)
+		}
+	}
+}
+
+func (s *Scheduler) takeCompletions(h *RunHandle) []Result {
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	results := s.pending[h]
+	delete(s.pending, h)
+	return results
 }
 
 // Step advances the run by one deterministic step.
@@ -296,9 +398,15 @@ func (h *RunHandle) Step(ctx context.Context) error {
 	// 2. Budget deadlines: abort attempts that exceeded their time budget.
 	for _, rec := range h.sessions {
 		if rec.budgeted && !rec.deadline.IsZero() && now.After(rec.deadline) {
-			_ = rec.sess.Abort(ctx)
-			rec.budgeted = false // abort already requested; completion arrives via results
 			rec.abortIsBudget = true
+			if err := rec.sess.Abort(ctx); err != nil {
+				// Keep the deadline armed. Provider abort failures must be retried;
+				// otherwise one transient error lets an over-budget attempt run
+				// indefinitely. A natural completion racing this failure is still
+				// rejected below because abortIsBudget remains set.
+				continue
+			}
+			rec.budgeted = false // abort accepted; completion arrives via results
 		}
 	}
 
@@ -316,8 +424,19 @@ func (h *RunHandle) Step(ctx context.Context) error {
 		}
 		delete(h.sessions, id)
 		h.suspended[id] = rec
+		if rec.budgeted && !rec.deadline.IsZero() {
+			rec.budgetRemain = max(rec.deadline.Sub(now), 0)
+			rec.budgetPaused = true
+		}
 		rec.budgeted = false
-		payload, _ := json.Marshal(map[string]any{"reason": "permission", "permissionID": pid})
+		permission := map[string]any{"reason": "permission", "permissionID": pid}
+		if info, ok := rec.sess.(adapter.PermissionInfo); ok {
+			if detail, detailOK, detailErr := info.PendingPermissionDetails(ctx); detailErr == nil && detailOK {
+				permission["tool"] = detail.Tool
+				permission["input"] = detail.Input
+			}
+		}
+		payload, _ := json.Marshal(permission)
 		if err := h.transit(ctx, id, graph.StateRunning, graph.StateBlocked, string(payload)); err != nil {
 			return err
 		}
@@ -335,10 +454,13 @@ func (h *RunHandle) Step(ctx context.Context) error {
 		}
 		delete(h.suspended, id)
 		h.sessions[id] = rec
-		if n := h.nodeByID(id); n != nil && n.Budget.MaxDuration > 0 {
-			// Re-arm the time budget with the remaining time.
-			rec.deadline = now.Add(time.Until(rec.deadline).Round(0))
+		if rec.budgetPaused {
+			// Permission waits do not consume provider runtime. Re-arm against
+			// the scheduler clock with the budget left when the node blocked.
+			rec.deadline = now.Add(rec.budgetRemain)
 			rec.budgeted = true
+			rec.budgetPaused = false
+			rec.budgetRemain = 0
 		}
 		if h.done {
 			h.done = false
@@ -349,34 +471,19 @@ func (h *RunHandle) Step(ctx context.Context) error {
 		}
 	}
 
-	// 3. Cooperative driver completions.
-	if stepper, ok := h.s.drv.(adapter.Stepper); ok {
-		for _, c := range stepper.Step(ctx, now) {
-			h.results <- Result{
-				AttemptID: c.AttemptID,
-				SessionID: c.SessionID,
-				Status:    c.Status,
-				Messages:  c.Messages,
-				Err:       c.Err,
-				Budget:    c.Budget,
-			}
-		}
-	}
+	// 3. Cooperative driver completions. The driver is shared by all runs;
+	// route results centrally so one run cannot consume another's attempt.
+	h.s.collectCompletions(ctx, now)
+	h.results = append(h.results, h.s.takeCompletions(h)...)
 
 	// 4. Drain and handle results (completions from any source).
-	handled := 0
-	for {
-		select {
-		case res := <-h.results:
-			handled++
-			if err := h.finishAttempt(ctx, res); err != nil {
-				return err
-			}
-		default:
-			goto drained
+	for len(h.results) > 0 {
+		res := h.results[0]
+		h.results = h.results[1:]
+		if err := h.finishAttempt(ctx, res); err != nil {
+			return err
 		}
 	}
-drained:
 
 	// 5. Block permanently-unrunnable nodes.
 
@@ -398,8 +505,8 @@ drained:
 	if h.breaker {
 		for _, n := range h.g.Nodes {
 			st, _ := h.tr.State(n.ID)
-			if st == graph.StatePending {
-				if err := h.transit(ctx, n.ID, graph.StatePending, graph.StateBlocked, `{"reason":"circuit breaker"}`); err != nil {
+			if st == graph.StatePending || st == graph.StateReady {
+				if err := h.transit(ctx, n.ID, st, graph.StateBlocked, `{"reason":"circuit breaker"}`); err != nil {
 					return err
 				}
 			}
@@ -411,8 +518,8 @@ drained:
 		h.s.opts.RunMaxCost > 0 && h.runCost >= h.s.opts.RunMaxCost {
 		for _, n := range h.g.Nodes {
 			st, _ := h.tr.State(n.ID)
-			if st == graph.StatePending {
-				if err := h.transit(ctx, n.ID, graph.StatePending, graph.StateBlocked, `{"reason":"run budget exceeded"}`); err != nil {
+			if st == graph.StatePending || st == graph.StateReady {
+				if err := h.transit(ctx, n.ID, st, graph.StateBlocked, `{"reason":"run budget exceeded"}`); err != nil {
 					return err
 				}
 			}
@@ -421,7 +528,8 @@ drained:
 
 	ready, blocked := graph.ComputeReady(h.g, h.tr)
 	for _, n := range blocked {
-		if err := h.transit(ctx, n.ID, graph.StatePending, graph.StateBlocked, ""); err != nil {
+		state, _ := h.tr.State(n.ID)
+		if err := h.transit(ctx, n.ID, state, graph.StateBlocked, ""); err != nil {
 			return err
 		}
 	}
@@ -488,6 +596,9 @@ func (h *RunHandle) transit(ctx context.Context, id graph.NodeID, from, to graph
 	if _, err := h.s.store.AppendTransition(ctx, h.runID, string(id), from, to, payload, h.s.clk.Now()); err != nil {
 		return err
 	}
+	if to == graph.StateFailed {
+		h.failures = append(h.failures, h.s.clk.Now())
+	}
 	return nil
 }
 
@@ -514,7 +625,7 @@ func (h *RunHandle) startAttempt(ctx context.Context, n *graph.Node) error {
 		return err
 	}
 	no++
-	attemptID := fmt.Sprintf("%s/%d", n.ID, no)
+	attemptID := fmt.Sprintf("%s/%s/%d", h.runID, n.ID, no)
 	switch n.Type {
 	case graph.NodeCheck:
 		return h.startCheck(ctx, n, attemptID, no, now)
@@ -562,6 +673,7 @@ func (h *RunHandle) startAttempt(ctx context.Context, n *graph.Node) error {
 		}
 		return nil
 	}
+	h.s.registerAttempt(h, attemptID)
 	started := now.UnixMilli()
 	h.sessions[n.ID] = &sessionRec{
 		nodeID:    n.ID,
@@ -653,7 +765,7 @@ func (h *RunHandle) startCheck(ctx context.Context, n *graph.Node, attemptID str
 			"stderr": stderr,
 		},
 	}
-	h.results <- Result{AttemptID: attemptID, SessionID: sess.ID(), Status: adapter.StatusIdle, Messages: []adapter.Message{msg}}
+	h.results = append(h.results, Result{AttemptID: attemptID, SessionID: sess.ID(), Status: adapter.StatusIdle, Messages: []adapter.Message{msg}})
 	return h.emitEvent(ctx, store.EventAttempt, n.ID, graph.State(""), graph.State(""), attemptID,
 		`{"phase":"start","sessionID":"`+sess.ID()+`"}`)
 }
@@ -787,8 +899,9 @@ func (h *RunHandle) startMerge(ctx context.Context, n *graph.Node, attemptID str
 	return h.completeInline(ctx, n, attemptID, no, now, exit, stdout, stderr, merged)
 }
 
-// startGate parks a human gate node in running until an operator approves
-// or rejects it. No driver session is involved.
+// startGate parks a human gate node in running until an operator or an
+// explicitly pre-authorized orchestrator approves or rejects it. No driver
+// session is involved; pre-authorization is policy metadata, not a bypass.
 func (h *RunHandle) startGate(ctx context.Context, n *graph.Node, attemptID string, no int, now time.Time) error {
 	sess := &gateSession{id: "gate:" + string(n.ID)}
 	started := now.UnixMilli()
@@ -842,7 +955,7 @@ func (h *RunHandle) completeInline(ctx context.Context, n *graph.Node, attemptID
 			"stderr": stderr,
 		},
 	}
-	h.results <- Result{AttemptID: attemptID, SessionID: sess.ID(), Status: adapter.StatusIdle, Messages: []adapter.Message{msg}}
+	h.results = append(h.results, Result{AttemptID: attemptID, SessionID: sess.ID(), Status: adapter.StatusIdle, Messages: []adapter.Message{msg}})
 	return h.emitEvent(ctx, store.EventAttempt, n.ID, graph.State(""), graph.State(""), attemptID,
 		`{"phase":"start","sessionID":"`+sess.ID()+`"}`)
 }
@@ -883,7 +996,6 @@ func (h *RunHandle) RetryNode(ctx context.Context, id graph.NodeID) error {
 		return fmt.Errorf("unknown node %s", id)
 	}
 	now := h.s.clk.Now()
-	h.breaker = false
 	switch st {
 	case graph.StateBlocked:
 		if err := h.transit(ctx, id, graph.StateBlocked, graph.StateReady, `{"reason":"operator retry"}`); err != nil {
@@ -917,6 +1029,8 @@ func (h *RunHandle) RetryNode(ctx context.Context, id graph.NodeID) error {
 	default:
 		return fmt.Errorf("node %s is in state %s and cannot be retried", id, st)
 	}
+	h.breaker = false
+	h.failures = nil
 	// A settled run must be re-activated.
 	if h.done {
 		h.done = false
@@ -945,6 +1059,8 @@ func (h *RunHandle) PermissionSession(_ context.Context, id graph.NodeID) (adapt
 }
 
 // Steer sends a message to the in-flight attempt of a node (agent steer).
+// The steering action is recorded in the event log so it participates in
+// the monotonic per-run sequence streamed by the live-event endpoint.
 func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -952,7 +1068,61 @@ func (h *RunHandle) Steer(ctx context.Context, id graph.NodeID, message string) 
 	if !ok {
 		return fmt.Errorf("node %s has no in-flight attempt", id)
 	}
-	return rec.sess.Send(ctx, message)
+	if err := rec.sess.Send(ctx, message); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{"message": message})
+	_, err := h.s.store.AppendEvent(ctx, h.runID, string(id), store.EventSteer, graph.State(""), graph.State(""), rec.attemptID, string(payload), h.s.clk.Now())
+	return err
+}
+
+// Tail returns the last n transcript lines of the in-flight attempt of a
+// node, for live output in the companion TUI. It reports an error when the
+// node has no live session (e.g. inline check/gate nodes).
+func (h *RunHandle) Tail(ctx context.Context, id graph.NodeID, n int) ([]string, error) {
+	if id == "" {
+		return nil, fmt.Errorf("node required")
+	}
+	if n < 1 || n > 500 {
+		return nil, fmt.Errorf("lines must be between 1 and 500")
+	}
+	h.mu.Lock()
+	rec := h.sessions[id]
+	if rec == nil {
+		rec = h.suspended[id]
+	}
+	if rec == nil {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("node %s has no in-flight attempt", id)
+	}
+	// Session calls may perform network I/O. Copy the stable interface
+	// reference while protected, then release the scheduler mutex before
+	// waiting on the provider.
+	sess := rec.sess
+	h.mu.Unlock()
+	msgs, err := sess.Messages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return transcriptLines(msgs, n), nil
+}
+
+// transcriptLines flattens a session transcript into text lines and keeps
+// only the last n of them (a "tail").
+func transcriptLines(msgs []adapter.Message, n int) []string {
+	lines := make([]string, 0)
+	for _, m := range msgs {
+		for _, ln := range strings.Split(m.Text, "\n") {
+			if ln == "" {
+				continue
+			}
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
 }
 
 func (h *RunHandle) decideGate(ctx context.Context, id graph.NodeID, approve bool) error {
@@ -995,7 +1165,17 @@ func (h *RunHandle) finishAttempt(ctx context.Context, res Result) error {
 	if rec == nil {
 		return fmt.Errorf("result for unknown attempt %s", res.AttemptID)
 	}
+	h.s.unregisterAttempt(h, res.AttemptID)
 	res.Budget = res.Budget || rec.abortIsBudget
+	if res.Budget && res.Status == adapter.StatusIdle {
+		// The provider may finish naturally while a budget abort is being
+		// retried. It is now safe to stop tracking, but work completed after the
+		// deadline cannot pass verification as an on-time success.
+		res.Status = adapter.StatusError
+		if res.Err == nil {
+			res.Err = fmt.Errorf("time budget exceeded")
+		}
+	}
 	now := h.s.clk.Now()
 	delete(h.sessions, rec.nodeID)
 	delete(h.suspended, rec.nodeID)
@@ -1027,6 +1207,9 @@ func (h *RunHandle) finishAttempt(ctx context.Context, res Result) error {
 	case adapter.StatusAborted, adapter.StatusError:
 		to := graph.StateFailed
 		reason := `"aborted"`
+		if res.Status == adapter.StatusError {
+			reason = `"provider error"`
+		}
 		if res.Err != nil {
 			reason = `"` + jsonEscape(res.Err.Error()) + `"`
 		}
@@ -1057,9 +1240,29 @@ func (h *RunHandle) finishAttempt(ctx context.Context, res Result) error {
 		return err
 	}
 	node := h.nodeByID(rec.nodeID)
-	verdict, err := h.s.ver.Verdict(ctx, node, rec.no, rec.worktree, res.Messages)
-	if err != nil {
-		verdict = Verdict{Pass: false, Feedback: "verifier error: " + err.Error()}
+	var verdict Verdict
+	if rec.worktree != "" && h.s.opts.Worktrees != nil && worktree.NodeIsWriting(string(node.Type), node.Role) {
+		files, scopeErr := h.s.opts.Worktrees.ChangedFiles(ctx, rec.worktree)
+		if scopeErr != nil {
+			verdict = Verdict{Pass: false, Feedback: "scope inspection failed: " + scopeErr.Error()}
+		} else {
+			var outside []string
+			for _, file := range files {
+				if !worktree.ScopeContains(node.WriteScope, file) {
+					outside = append(outside, file)
+				}
+			}
+			if len(outside) > 0 {
+				verdict = Verdict{Pass: false, Feedback: "attempt changed paths outside write scope: " + strings.Join(outside, ", ")}
+			}
+		}
+	}
+	if verdict.Feedback == "" {
+		var err error
+		verdict, err = h.s.ver.Verdict(ctx, node, rec.no, rec.worktree, res.Messages)
+		if err != nil {
+			verdict = Verdict{Pass: false, Feedback: "verifier error: " + err.Error()}
+		}
 	}
 	ev, _ := json.Marshal(map[string]any{"pass": verdict.Pass, "feedback": verdict.Feedback, "evidence": verdict.Evidence})
 	if err := h.emitEvent(ctx, store.EventVerdict, rec.nodeID, graph.State(""), graph.State(""), rec.attemptID, string(ev)); err != nil {
@@ -1123,7 +1326,6 @@ func (h *RunHandle) finishAttempt(ctx context.Context, res Result) error {
 			FinishedAt: &finished, Evidence: verdict.Feedback, Cost: cost, Tokens: tokens,
 		})
 	}
-	h.failures = append(h.failures, now)
 	if err := h.transit(ctx, rec.nodeID, graph.StateVerifying, graph.StateFailed, ""); err != nil {
 		return err
 	}

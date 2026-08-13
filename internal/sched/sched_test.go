@@ -302,6 +302,40 @@ func TestRetryExhaustedFails(t *testing.T) {
 	}
 }
 
+func TestAttemptIDsAreUniqueAcrossRuns(t *testing.T) {
+	st := newStore(t)
+	clk := fakeClock()
+	ctx := context.Background()
+
+	for _, runID := range []string{"run-first", "run-second"} {
+		drv := sched.NewFakeDriver(clk, scriptsFor("worker"))
+		ver := sched.NewFakeVerifier(nil, sched.Verdict{Pass: true})
+		s := newSched(t, st, drv, ver, clk, sched.Options{Concurrency: 1})
+		h, err := s.Create(ctx, runID, &graph.Graph{Nodes: []*graph.Node{agent("worker")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drive(t, h, clk, 10)
+		if !h.Done() {
+			t.Fatalf("%s did not complete", runID)
+		}
+	}
+
+	for _, runID := range []string{"run-first", "run-second"} {
+		attempts, err := st.Attempts(ctx, runID, "worker")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(attempts) != 1 {
+			t.Fatalf("%s attempts = %d, want 1", runID, len(attempts))
+		}
+		wantID := runID + "/worker/1"
+		if attempts[0].ID != wantID {
+			t.Fatalf("%s attempt ID = %q, want %q", runID, attempts[0].ID, wantID)
+		}
+	}
+}
+
 func TestBudgetAbortFails(t *testing.T) {
 	st := newStore(t)
 	clk := fakeClock()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,6 +80,7 @@ func setupDaemon(t *testing.T, apiKey string) (*api, *daemon.Daemon, *store.Stor
 		Concurrency: 4, Worktrees: wtm,
 	})
 	d := daemon.New(st, s, nil, repo, apiKey)
+	t.Cleanup(d.Close)
 	srv := httptest.NewServer(d.Handler())
 	t.Cleanup(srv.Close)
 	return &api{t: t, cli: srv.Client(), base: srv.URL}, d, st, drv
@@ -140,6 +143,11 @@ func TestRoleEnforcement(t *testing.T) {
 	if code, _ := a.do("orchestrator", http.MethodPost, "/api/runs", map[string]any{"graph": g}); code != http.StatusCreated {
 		t.Fatalf("orchestrator create run: %d, want 201", code)
 	}
+	if code, body := a.do("orchestrator", http.MethodPost, "/api/runs", map[string]any{
+		"graph": g, "autoApproveGates": true,
+	}); code != http.StatusForbidden || !strings.Contains(body, "only an operator") {
+		t.Fatalf("orchestrator self-authorization: %d %s, want 403", code, body)
+	}
 	// Workers may not approve; operators may. (Run id from the created run.)
 	if code, _ := a.do("worker", http.MethodPost, "/api/runs/whatever/approve", map[string]any{"nodeID": "w1"}); code != http.StatusForbidden {
 		t.Fatalf("worker approve: %d, want 403", code)
@@ -147,6 +155,89 @@ func TestRoleEnforcement(t *testing.T) {
 	// Unknown role rejected (health is open, everything else is gated).
 	if code, _ := a.do("hacker", http.MethodPost, "/api/runs", map[string]any{"graph": &graph.Graph{}}); code != http.StatusForbidden {
 		t.Fatalf("unknown role: %d, want 403", code)
+	}
+}
+
+func TestConcurrentWatchAndCreate(t *testing.T) {
+	a, _, _, _ := setupDaemon(t, "")
+	g := &graph.Graph{Nodes: []*graph.Node{gateNode("gate")}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create seed run: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 16)
+	request := func(method, path string, body any) error {
+		var rdr io.Reader
+		if body != nil {
+			data, err := json.Marshal(body)
+			if err != nil {
+				return err
+			}
+			rdr = bytes.NewReader(data)
+		}
+		req, err := http.NewRequest(method, a.base+path, rdr)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Corral-Role", "operator")
+		resp, err := a.cli.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= http.StatusBadRequest {
+			return fmt.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, respBody)
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		created := 0
+		for attempts := 0; attempts < 1000 && created < 50; attempts++ {
+			if err := request(http.MethodPost, "/api/runs", map[string]any{"graph": g}); err != nil {
+				if strings.Contains(err.Error(), "SQLITE_BUSY") {
+					time.Sleep(time.Millisecond)
+					continue
+				}
+				errs <- err
+				return
+			}
+			created++
+		}
+		if created < 50 {
+			errs <- fmt.Errorf("created %d concurrent runs, want 50", created)
+		}
+	}()
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 200 {
+				if err := request(http.MethodGet, "/api/runs/"+created.RunID+"/watch?since=0&timeout=1", nil); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
@@ -260,6 +351,20 @@ func TestCancelAndRetryThroughAPI(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("steer: %d %s", code, body)
 	}
+	events, err := st.Events(context.Background(), created.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var steer *store.Event
+	for i := range events {
+		if events[i].Type == store.EventSteer {
+			steer = &events[i]
+			break
+		}
+	}
+	if steer == nil || steer.NodeID != "w1" || !strings.Contains(string(steer.Payload), "wrap up") {
+		t.Fatalf("steer event missing or malformed: %+v", steer)
+	}
 	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/cancel", map[string]any{"nodeID": "w1"})
 	if code != http.StatusOK {
 		t.Fatalf("cancel: %d %s", code, body)
@@ -268,6 +373,7 @@ func TestCancelAndRetryThroughAPI(t *testing.T) {
 
 	// Failed node retried through the API.
 	bad := workerNode("bad", "x.txt", "X")
+	bad.WriteScope = []string{"x.txt", "missing.txt"}
 	bad.Verification = &graph.Verification{Kind: "command", Command: []string{"test", "-f", "missing.txt"}}
 	bad.RetryPolicy = graph.RetryPolicy{MaxRetries: 0, Backoff: tick}
 	drv.AppendScript("bad", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"x.txt": "X"}})
@@ -298,6 +404,193 @@ type fakePlanner struct{ g *graph.Graph }
 func (f *fakePlanner) Plan(_ context.Context, _ string) (*graph.Graph, error) { return f.g, nil }
 
 var _ = daemon.RoleOperator
+
+// TestPreAuthorizedGateThroughAPI verifies that autoApproveGates is stored
+// and exposed as authorization metadata while the gate still waits for an
+// explicit orchestrator/operator API action.
+func TestPreAuthorizedGateThroughAPI(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		workerNode("w1", "a.txt", "A1"),
+		gateNode("gate", "w1"),
+	}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g, "autoApproveGates": true})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+
+	// The flag is exposed on the run detail.
+	code, body = a.do("operator", http.MethodGet, "/api/runs/"+created.RunID, nil)
+	if code != http.StatusOK || !strings.Contains(body, `"autoApproveGates":true`) {
+		t.Fatalf("autoApproveGates not exposed: %d %s", code, body)
+	}
+	// The flag authorizes the orchestrator to act; scheduler still exposes
+	// the gate instead of silently bypassing it.
+	a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 30*time.Second)
+	snap := a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		gates, _ := m["gatesAwaitingApproval"].([]any)
+		return len(gates) == 1 && gates[0] == "gate"
+	})
+	if aa, _ := snap["autoApproveGates"].(bool); !aa {
+		t.Fatal("watch snapshot lost pre-authorization flag")
+	}
+	code, body = a.do("orchestrator", http.MethodPost, "/api/runs/"+created.RunID+"/approve", map[string]any{"nodeID": "gate"})
+	if code != http.StatusOK {
+		t.Fatalf("orchestrator approve: %d %s", code, body)
+	}
+	a.waitState(t, "", created.RunID, "gate", graph.StateDone, 30*time.Second)
+	snap = a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		done, _ := m["done"].(bool)
+		return done
+	})
+	if snap["status"] != "completed" {
+		t.Fatalf("run status = %v, want completed", snap["status"])
+	}
+}
+
+func TestOrchestratorGateActionsRequirePersistedPreAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   graph.State
+	}{
+		{action: "approve", want: graph.StateDone},
+		{action: "reject", want: graph.StateBlocked},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			a, _, st, _ := setupDaemon(t, "")
+			g := &graph.Graph{Nodes: []*graph.Node{gateNode("gate")}}
+			code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{
+				"graph":            g,
+				"autoApproveGates": false,
+			})
+			if code != http.StatusCreated {
+				t.Fatalf("create: %d %s", code, body)
+			}
+			var created struct{ RunID string }
+			if err := json.Unmarshal([]byte(body), &created); err != nil {
+				t.Fatal(err)
+			}
+			a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 30*time.Second)
+
+			ru, err := st.Run(context.Background(), created.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ru.AutoApproveGates {
+				t.Fatal("run unexpectedly persisted with autoApproveGates=true")
+			}
+
+			code, body = a.do("orchestrator", http.MethodPost, "/api/runs/"+created.RunID+"/"+tc.action, map[string]any{"nodeID": "gate"})
+			if code != http.StatusForbidden {
+				t.Fatalf("non-pre-authorized orchestrator %s: %d %s, want 403", tc.action, code, body)
+			}
+			a.waitState(t, "", created.RunID, "gate", graph.StateRunning, 5*time.Second)
+
+			code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/"+tc.action, map[string]any{"nodeID": "gate"})
+			if code != http.StatusOK {
+				t.Fatalf("operator %s: %d %s", tc.action, code, body)
+			}
+			a.waitState(t, "", created.RunID, "gate", tc.want, 30*time.Second)
+		})
+	}
+}
+
+// TestWatchReportsGateAndDone drives the run through the watch endpoint
+// (long-poll JSON): it must report the gate awaiting approval, and a done
+// snapshot once the run completes after the operator approves.
+func TestWatchReportsGateAndDone(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{
+		workerNode("w1", "a.txt", "A1"),
+		gateNode("gate", "w1"),
+	}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+
+	// The worker runs and the gate parks awaiting approval — the watch
+	// snapshot must flag it.
+	snap := a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		gates, _ := m["gatesAwaitingApproval"].([]any)
+		return len(gates) == 1 && gates[0] == "gate"
+	})
+	if st, _ := snap["states"].(map[string]any)["gate"].(string); st != string(graph.StateRunning) {
+		t.Fatalf("gate state = %v, want running", st)
+	}
+	if aa, _ := snap["autoApproveGates"].(bool); aa {
+		t.Fatal("autoApproveGates set on a default run")
+	}
+
+	// Approve via the API; the run completes and the watch reports done.
+	code, body = a.do("operator", http.MethodPost, "/api/runs/"+created.RunID+"/approve", map[string]any{"nodeID": "gate"})
+	if code != http.StatusOK {
+		t.Fatalf("approve: %d %s", code, body)
+	}
+	snap = a.watchUntil(t, created.RunID, "", func(m map[string]any) bool {
+		d, _ := m["done"].(bool)
+		return d
+	})
+	if s, _ := snap["status"].(string); s != "completed" {
+		t.Fatalf("done status = %v, want completed", snap["status"])
+	}
+}
+
+// TestWatchReportsDoneForSettledRun opens the watch stream after a run
+// already settled: with no events after the cursor the endpoint still
+// reports the done snapshot immediately.
+func TestWatchReportsDoneForSettledRun(t *testing.T) {
+	a, _, _, drv := setupDaemon(t, "")
+	drv.SetScript("w1", sched.Script{Delay: 50 * time.Millisecond, Write: map[string]string{"a.txt": "A1"}})
+	g := &graph.Graph{Nodes: []*graph.Node{workerNode("w1", "a.txt", "A1")}}
+	code, body := a.do("operator", http.MethodPost, "/api/runs", map[string]any{"graph": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct{ RunID string }
+	json.Unmarshal([]byte(body), &created)
+	a.waitState(t, "", created.RunID, "w1", graph.StateDone, 30*time.Second)
+
+	snap := a.watchUntil(t, created.RunID, "999999", func(m map[string]any) bool {
+		d, _ := m["done"].(bool)
+		return d
+	})
+	if s, _ := snap["status"].(string); s != "completed" {
+		t.Fatalf("done status = %v, want completed", snap["status"])
+	}
+}
+
+// watchUntil long-polls /watch until a snapshot satisfies pred.
+func (a *api) watchUntil(t *testing.T, runID, since string, pred func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		q := "timeout=1"
+		if since != "" {
+			q += "&since=" + since
+		}
+		code, body := a.do("operator", http.MethodGet, "/api/runs/"+runID+"/watch?"+q, nil)
+		if code != http.StatusOK {
+			t.Fatalf("watch: %d %s", code, body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(body), &m); err != nil {
+			t.Fatalf("watch decode: %v", err)
+		}
+		if pred(m) {
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watch timed out waiting for snapshot: %s", body)
+		}
+	}
+}
 
 func TestPermissionThroughAPI(t *testing.T) {
 	a, d, _, drv := setupDaemon(t, "")

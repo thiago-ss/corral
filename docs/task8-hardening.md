@@ -7,8 +7,11 @@ Status: **DONE** — all acceptance criteria covered with tests.
 - **Permission requests → explicit blocked state**
   - `adapter.PermissionSession` (optional interface): `PendingPermission`,
     `RespondPermission`.
-  - `ocxadapter` tracks `permission.updated` events per session and answers
-    via `POST /session/:id/permissions/:permissionID`.
+  - `ocxadapter` tracks `permission.asked` / `permission.v2.asked`; one shared,
+    bounded background poll queries durable `GET /permission` across SSE
+    reconnect gaps, keeping scheduler `PendingPermission` checks local and
+    non-blocking. Answers use `POST /permission/:requestID/reply`
+    (`once` / `reject`).
   - Scheduler: a pending permission moves the node `running → blocked`
     (payload carries `permissionID`) and the session is *suspended* — its
     eventual completion still resolves the attempt (machine walk
@@ -26,6 +29,17 @@ Status: **DONE** — all acceptance criteria covered with tests.
     new work starts (fixed ordering bug where new nodes could start the
     step after a budget/breaker trip).
   - Per-node time/token/cost budgets from Tasks 2/4 unchanged.
+- **Daemon defaults**: the production daemon wires these safeguards with sane
+  defaults, each overridable via env vars (a value of `0` disables it):
+  - `CORRAL_BREAKER_MAX_FAILURES` (default `5`) and `CORRAL_BREAKER_WINDOW`
+    (default `900`s / 15 min) — the circuit breaker trips after that many node
+    failures within the window, blocking pending nodes until an operator retry
+    resets it.
+  - `CORRAL_RUN_MAX_TOKENS` (default `1_000_000`) and `CORRAL_RUN_MAX_COST`
+    (default `$100`) — run-level budgets accumulated across finished attempts;
+    pending nodes block once exceeded. Wired in `cmd/corral/main.go` via
+    `schedOpts`, keeping the fixed `Concurrency`/`Worktrees` wiring intact.
+    Covered by `TestSchedOptsDefaultsAndOverrides`.
 - **Secrets hygiene**: `store.Redact` strips bearer tokens, api keys,
   passwords/secrets/tokens and `sk-…` patterns at the persistence
   boundary (attempt evidence, event payloads, artifact content). Verified

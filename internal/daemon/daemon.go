@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,8 +54,14 @@ type Daemon struct {
 	apiKey string
 	ctx    context.Context
 
-	mu   sync.Mutex
-	runs map[string]*sched.RunHandle
+	mu               sync.RWMutex
+	runs             map[string]*sched.RunHandle
+	broker           *broker
+	eventHeartbeat   time.Duration
+	eventHeartbeatMu sync.RWMutex
+	eventUnsubscribe func()
+	eventPumpDone    chan struct{}
+	closeOnce        sync.Once
 }
 
 // Dir returns the project directory the daemon manages.
@@ -64,11 +71,36 @@ func (d *Daemon) Dir() string { return d.dir }
 func (d *Daemon) SetPlanner(p Planner) { d.plan = p }
 
 func New(st *store.Store, s *sched.Scheduler, plan Planner, dir, apiKey string) *Daemon {
-	return &Daemon{
+	events, unsubscribe := st.SubscribeEvents()
+	d := &Daemon{
 		st: st, sched: s, plan: plan, dir: dir, apiKey: apiKey,
-		ctx:  context.Background(),
-		runs: map[string]*sched.RunHandle{},
+		ctx:              context.Background(),
+		runs:             map[string]*sched.RunHandle{},
+		broker:           newBroker(),
+		eventHeartbeat:   defaultEventHeartbeat,
+		eventUnsubscribe: unsubscribe,
+		eventPumpDone:    make(chan struct{}),
 	}
+	go d.forwardEvents(events)
+	return d
+}
+
+func (d *Daemon) forwardEvents(events <-chan store.Event) {
+	defer close(d.eventPumpDone)
+	for ev := range events {
+		d.broker.Publish(ev)
+	}
+	d.broker.Close()
+}
+
+// Close detaches the daemon from the store and closes live event streams.
+// Other daemons subscribed to the same store are unaffected.
+func (d *Daemon) Close() {
+	d.closeOnce.Do(func() {
+		d.eventUnsubscribe()
+		d.broker.Close()
+		<-d.eventPumpDone
+	})
 }
 
 // SetContext replaces the daemon's background context (its lifetime).
@@ -106,6 +138,8 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs", d.role(RoleOrchestrator, RoleOperator)(d.handleCreateRun))
 	mux.HandleFunc("GET /api/runs", d.handleListRuns)
 	mux.HandleFunc("GET /api/runs/{id}", d.handleGetRun)
+	mux.HandleFunc("GET /api/runs/{id}/watch", d.handleWatchRun)
+	mux.HandleFunc("GET /api/runs/{id}/tail", d.handleTail)
 	mux.HandleFunc("POST /api/runs/{id}/approve", d.role(RoleOperator, RoleOrchestrator)(d.handleApprove))
 	mux.HandleFunc("POST /api/runs/{id}/reject", d.role(RoleOperator, RoleOrchestrator)(d.handleReject))
 	mux.HandleFunc("POST /api/runs/{id}/cancel", d.role(RoleOperator, RoleOrchestrator)(d.handleCancel))
@@ -113,6 +147,7 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{id}/steer", d.role(RoleOperator, RoleOrchestrator)(d.handleSteer))
 	mux.HandleFunc("POST /api/runs/{id}/permission", d.role(RoleOperator, RoleOrchestrator)(d.handlePermission))
 	mux.HandleFunc("GET /api/runs/{id}/export", d.handleExport)
+	mux.HandleFunc("GET /api/runs/{id}/events", d.handleEvents)
 	mux.HandleFunc("GET /doc", d.handleOpenAPI)
 	return d.auth(mux)
 }
@@ -184,15 +219,23 @@ func (d *Daemon) handlePlan(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Graph *graph.Graph `json:"graph"`
+		Graph            *graph.Graph `json:"graph"`
+		AutoApproveGates bool         `json:"autoApproveGates"`
 	}
 	if err := readJSON(r, &req); err != nil || req.Graph == nil {
 		http.Error(w, "graph required", http.StatusBadRequest)
 		return
 	}
+	if req.AutoApproveGates {
+		role, _ := parseRole(r.Header.Get("X-Corral-Role"))
+		if role != RoleOperator {
+			http.Error(w, "only an operator may pre-authorize human gates", http.StatusForbidden)
+			return
+		}
+	}
 	ctx := r.Context()
 	runID := "run_" + randID(6)
-	h, err := d.sched.Create(ctx, runID, req.Graph)
+	h, err := d.sched.Create(ctx, runID, req.Graph, sched.CreateOptions{AutoApproveGates: req.AutoApproveGates})
 	if err != nil {
 		http.Error(w, "invalid graph: "+err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -205,13 +248,18 @@ func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) runHandle(id string) (*sched.RunHandle, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	h, ok := d.runs[id]
+	h, ok := d.lookupRunHandle(id)
 	if !ok {
 		return nil, fmt.Errorf("unknown run %s", id)
 	}
 	return h, nil
+}
+
+func (d *Daemon) lookupRunHandle(id string) (*sched.RunHandle, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	h, ok := d.runs[id]
+	return h, ok
 }
 
 type runSummary struct {
@@ -231,7 +279,7 @@ func (d *Daemon) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	var out []runSummary
 	for _, ru := range runs {
 		sum := runSummary{ID: ru.ID, Status: ru.Status, States: map[string]string{}}
-		if h, ok := d.runs[ru.ID]; ok {
+		if h, ok := d.lookupRunHandle(ru.ID); ok {
 			sum.Done = h.Done()
 			for _, n := range ru.Graph.Nodes {
 				if st, ok := h.State(n.ID); ok {
@@ -274,10 +322,14 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		attempts[string(n.ID)] = atts
 	}
 	resp := map[string]any{
-		"runID": id, "status": ru.Status, "graph": ru.Graph,
-		"events": events, "attempts": attempts,
+		"runID":            id,
+		"status":           ru.Status,
+		"graph":            ru.Graph,
+		"autoApproveGates": ru.AutoApproveGates,
+		"events":           events,
+		"attempts":         attempts,
 	}
-	if h, ok := d.runs[id]; ok {
+	if h, ok := d.lookupRunHandle(id); ok {
 		states := map[string]string{}
 		for _, n := range ru.Graph.Nodes {
 			if st, ok := h.State(n.ID); ok {
@@ -288,6 +340,119 @@ func (d *Daemon) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		resp["done"] = h.Done()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWatchRun long-polls a run for the orchestrator run loop. It
+// returns as soon as the run produces new events (milestones, a gate
+// awaiting approval, resolution, completion) or after the timeout, and
+// always carries the current snapshot: node states, gates awaiting
+// approval, whether the run is pre-authorized to auto-approve them, and
+// the event cursor to pass back as `since`.
+func (d *Daemon) handleWatchRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	q := r.URL.Query()
+	since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+	timeout := 60
+	if v := q.Get("timeout"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			timeout = n
+		}
+	}
+	if timeout < 1 {
+		timeout = 1
+	}
+	if timeout > 120 {
+		timeout = 120
+	}
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	ctx := r.Context()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		snap, changed, done, err := d.watchSnapshot(ctx, id, since)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if changed || done || time.Now().After(deadline) {
+			writeJSON(w, http.StatusOK, snap)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// watchSnapshot builds the watch response for a run. changed reports
+// whether any event happened after since; done whether the run settled.
+func (d *Daemon) watchSnapshot(ctx context.Context, id string, since int64) (map[string]any, bool, bool, error) {
+	ru, err := d.st.Run(ctx, id)
+	if err != nil {
+		return nil, false, false, err
+	}
+	events, err := d.st.Events(ctx, id)
+	if err != nil {
+		return nil, false, false, err
+	}
+	maxSeq := since
+	var newEvents []store.Event
+	for _, e := range events {
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+		if e.Seq > since {
+			newEvents = append(newEvents, e)
+		}
+	}
+
+	states := map[string]string{}
+	done := false
+	if h, ok := d.lookupRunHandle(id); ok {
+		for _, n := range ru.Graph.Nodes {
+			if st, ok := h.State(n.ID); ok {
+				states[string(n.ID)] = string(st)
+			}
+		}
+		done = h.Done()
+	} else {
+		if ns, err := d.st.NodeStates(ctx, id); err == nil {
+			for nid, st := range ns {
+				states[string(nid)] = string(st)
+			}
+		}
+		done = ru.Status != "active"
+	}
+	// The run status above was read before done was resolved; the store is
+	// finalized before the handle reports done, so re-read it so the
+	// snapshot never carries done=true with a stale status.
+	if done && ru.Status == "active" {
+		if ru2, err := d.st.Run(ctx, id); err == nil {
+			ru.Status = ru2.Status
+		}
+	}
+
+	var gates []string
+	for _, n := range ru.Graph.Nodes {
+		if n.Type == graph.NodeHuman && states[string(n.ID)] == string(graph.StateRunning) {
+			gates = append(gates, string(n.ID))
+		}
+	}
+
+	return map[string]any{
+		"runID":                 id,
+		"status":                ru.Status,
+		"done":                  done,
+		"autoApproveGates":      ru.AutoApproveGates,
+		"states":                states,
+		"gatesAwaitingApproval": gates,
+		"since":                 maxSeq,
+		"events":                newEvents,
+	}, len(newEvents) > 0, done, nil
 }
 
 func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, id graph.NodeID) error) {
@@ -310,10 +475,44 @@ func (d *Daemon) nodeAction(w http.ResponseWriter, r *http.Request, fn func(ctx 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleTail returns the live transcript tail of a node's in-flight
+// attempt (query params: node, lines). Used by the TUI's inspect view.
+func (d *Daemon) handleTail(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	node := q.Get("node")
+	if node == "" || len(node) > 256 {
+		http.Error(w, "node required", http.StatusBadRequest)
+		return
+	}
+	lines := 40
+	if v := q.Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			http.Error(w, "lines must be between 1 and 500", http.StatusBadRequest)
+			return
+		}
+		lines = n
+	}
+	h, err := d.runHandle(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	tail, err := h.Tail(r.Context(), graph.NodeID(node), lines)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": node, "lines": tail})
+}
+
 func (d *Daemon) handleApprove(w http.ResponseWriter, r *http.Request) {
 	h, err := d.runHandle(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if !d.gateActionAuthorized(w, r) {
 		return
 	}
 	d.nodeAction(w, r, func(ctx context.Context, id graph.NodeID) error { return h.ApproveNode(ctx, id) })
@@ -325,7 +524,30 @@ func (d *Daemon) handleReject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !d.gateActionAuthorized(w, r) {
+		return
+	}
 	d.nodeAction(w, r, func(ctx context.Context, id graph.NodeID) error { return h.RejectNode(ctx, id) })
+}
+
+// gateActionAuthorized enforces the run's persisted pre-authorization
+// policy. Operators may always resolve human gates; orchestrators may do so
+// only when the run was created with autoApproveGates enabled.
+func (d *Daemon) gateActionAuthorized(w http.ResponseWriter, r *http.Request) bool {
+	role, _ := parseRole(r.Header.Get("X-Corral-Role"))
+	if role != RoleOrchestrator {
+		return true
+	}
+	ru, err := d.st.Run(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return false
+	}
+	if !ru.AutoApproveGates {
+		http.Error(w, "orchestrator is not pre-authorized to resolve human gates", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {

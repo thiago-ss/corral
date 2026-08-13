@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -26,6 +28,7 @@ const (
 	EventRetry      EventType = "retry"      // retry scheduled
 	EventRun        EventType = "run"        // run lifecycle (created/completed)
 	EventGraph      EventType = "graph"      // graph version change
+	EventSteer      EventType = "steer"      // operator steering message to a running attempt
 )
 
 type Event struct {
@@ -58,10 +61,11 @@ type Attempt struct {
 }
 
 type Run struct {
-	ID        string       `json:"id"`
-	Graph     *graph.Graph `json:"graph"`
-	Status    string       `json:"status"` // active|completed|canceled
-	CreatedAt int64        `json:"createdAt"`
+	ID               string       `json:"id"`
+	Graph            *graph.Graph `json:"graph"`
+	Status           string       `json:"status"` // active|completed|canceled
+	AutoApproveGates bool         `json:"autoApproveGates"`
+	CreatedAt        int64        `json:"createdAt"`
 }
 
 // NodeRow is the materialized per-node state.
@@ -77,6 +81,63 @@ type NodeRow struct {
 
 type Store struct {
 	db *sql.DB
+
+	eventMu          sync.Mutex
+	eventSubscribers map[*eventSubscriber]struct{}
+	eventsClosed     bool
+}
+
+type eventSubscriber struct {
+	ch chan Event
+}
+
+// eventSubscriberBuffer decouples durable writes from live observers. A
+// subscriber that cannot keep up misses wakeups until it catches up, then
+// reconciles the gap from the durable log using its last sequence number.
+const eventSubscriberBuffer = 1024
+
+// SubscribeEvents observes events after their transactions commit. Delivery
+// is best effort and never blocks a store writer. The caller must unsubscribe;
+// a slow subscriber stays attached so later wakeups resume after it catches up.
+func (s *Store) SubscribeEvents() (<-chan Event, func()) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventsClosed {
+		ch := make(chan Event)
+		close(ch)
+		return ch, func() {}
+	}
+	sub := &eventSubscriber{ch: make(chan Event, eventSubscriberBuffer)}
+	s.eventSubscribers[sub] = struct{}{}
+	return sub.ch, func() { s.unsubscribeEvents(sub) }
+}
+
+func (s *Store) unsubscribeEvents(sub *eventSubscriber) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if _, ok := s.eventSubscribers[sub]; !ok {
+		return
+	}
+	delete(s.eventSubscribers, sub)
+	close(sub.ch)
+}
+
+// publish notifies every subscriber without waiting. Callers invoke it only
+// after the transaction containing ev has committed successfully.
+func (s *Store) publish(ev Event) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventsClosed {
+		return
+	}
+	for sub := range s.eventSubscribers {
+		select {
+		case sub.ch <- ev:
+		default:
+			// Notifications are wakeups, not the source of truth. Dropping one
+			// is safe; the next delivered wakeup triggers durable cursor replay.
+		}
+	}
 }
 
 func Open(path string) (*Store, error) {
@@ -109,10 +170,22 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, eventSubscribers: map[*eventSubscriber]struct{}{}}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	err := s.db.Close()
+	s.eventMu.Lock()
+	if !s.eventsClosed {
+		s.eventsClosed = true
+		for sub := range s.eventSubscribers {
+			close(sub.ch)
+		}
+		s.eventSubscribers = nil
+	}
+	s.eventMu.Unlock()
+	return err
+}
 
 func migrate(db *sql.DB) error {
 	schema := `
@@ -120,6 +193,7 @@ CREATE TABLE IF NOT EXISTS runs (
 	id        TEXT PRIMARY KEY,
 	graph     TEXT NOT NULL,
 	status    TEXT NOT NULL,
+	auto_approve_gates INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -175,10 +249,18 @@ CREATE TABLE IF NOT EXISTS artifacts (
 	PRIMARY KEY(run_id, attempt_id, name)
 );`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	// Migrate databases created before the auto-approve-gates column.
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN auto_approve_gates INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
-func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now time.Time) error {
+func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, autoApproveGates bool, now time.Time) error {
 	gj, err := json.Marshal(g)
 	if err != nil {
 		return err
@@ -189,8 +271,8 @@ func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO runs(id, graph, status, created_at) VALUES(?, ?, 'active', ?)`,
-		runID, string(gj), now.UnixMilli()); err != nil {
+		`INSERT INTO runs(id, graph, status, auto_approve_gates, created_at) VALUES(?, ?, 'active', ?, ?)`,
+		runID, string(gj), boolInt(autoApproveGates), now.UnixMilli()); err != nil {
 		return err
 	}
 	for _, n := range g.Nodes {
@@ -200,21 +282,26 @@ func (s *Store) CreateRun(ctx context.Context, runID string, g *graph.Graph, now
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events(run_id, seq, etype, payload, created_at) VALUES(?, 1, 'run', '{"status":"created"}', ?)`,
-		runID, now.UnixMilli()); err != nil {
+	ev, err := s.appendEventTx(ctx, tx, runID, 1, "", EventRun, "", "", "", "", `{"status":"created"}`, now)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publish(*ev)
+	return nil
 }
 
 func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, graph, status, created_at FROM runs WHERE id = ?`, runID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, graph, status, auto_approve_gates, created_at FROM runs WHERE id = ?`, runID)
 	var r Run
 	var gj string
-	if err := row.Scan(&r.ID, &gj, &r.Status, &r.CreatedAt); err != nil {
+	var auto int
+	if err := row.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 		return nil, err
 	}
+	r.AutoApproveGates = auto != 0
 	if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 		return nil, fmt.Errorf("decode graph: %w", err)
 	}
@@ -223,7 +310,7 @@ func (s *Store) Run(ctx context.Context, runID string) (*Run, error) {
 
 // ListRuns returns all runs with their status.
 func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, graph, status, created_at FROM runs ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, graph, status, auto_approve_gates, created_at FROM runs ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -232,15 +319,24 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	for rows.Next() {
 		var r Run
 		var gj string
-		if err := rows.Scan(&r.ID, &gj, &r.Status, &r.CreatedAt); err != nil {
+		var auto int
+		if err := rows.Scan(&r.ID, &gj, &r.Status, &auto, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.AutoApproveGates = auto != 0
 		if err := json.Unmarshal([]byte(gj), &r.Graph); err != nil {
 			return nil, fmt.Errorf("decode graph: %w", err)
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (s *Store) CompleteRun(ctx context.Context, runID string, status string, now time.Time) error {
@@ -252,10 +348,15 @@ func (s *Store) CompleteRun(ctx context.Context, runID string, status string, no
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
 		return err
 	}
-	if _, err := appendEventTx(ctx, tx, runID, 0, "", EventRun, "", "", "", "", `{"status":"`+status+`"}`, now); err != nil {
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, "", EventRun, "", "", "", "", `{"status":"`+status+`"}`, now)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.publish(*ev)
+	return nil
 }
 
 // AppendTransition records a state change and updates the materialized
@@ -266,7 +367,7 @@ func (s *Store) AppendTransition(ctx context.Context, runID string, nodeID strin
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, err := appendEventTx(ctx, tx, runID, 0, nodeID, EventTransition, string(from), string(to), "", "", payload, now)
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, nodeID, EventTransition, string(from), string(to), "", "", payload, now)
 	if err != nil {
 		return 0, err
 	}
@@ -275,7 +376,11 @@ func (s *Store) AppendTransition(ctx context.Context, runID string, nodeID strin
 		string(to), now.UnixMilli(), runID, nodeID); err != nil {
 		return 0, err
 	}
-	return seq, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.publish(*ev)
+	return ev.Seq, nil
 }
 
 func (s *Store) AppendEvent(ctx context.Context, runID, nodeID string, typ EventType, from, to graph.State, attemptID, payload string, now time.Time) (int64, error) {
@@ -284,38 +389,60 @@ func (s *Store) AppendEvent(ctx context.Context, runID, nodeID string, typ Event
 		return 0, err
 	}
 	defer tx.Rollback()
-	seq, err := appendEventTx(ctx, tx, runID, 0, nodeID, typ, string(from), string(to), attemptID, "", payload, now)
+	ev, err := s.appendEventTx(ctx, tx, runID, 0, nodeID, typ, string(from), string(to), attemptID, "", payload, now)
 	if err != nil {
 		return 0, err
 	}
-	return seq, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.publish(*ev)
+	return ev.Seq, nil
 }
 
-// appendEventTx computes the next per-run sequence and inserts the event.
-func appendEventTx(ctx context.Context, tx *sql.Tx, runID string, forceSeq int64, nodeID string, typ EventType, from, to, attemptID, _, payload string, now time.Time) (int64, error) {
+// appendEventTx computes the next per-run sequence, inserts the event and
+// returns the fully populated event for the caller to publish after commit.
+func (s *Store) appendEventTx(ctx context.Context, tx *sql.Tx, runID string, forceSeq int64, nodeID string, typ EventType, from, to, attemptID, _, payload string, now time.Time) (*Event, error) {
 	var seq int64
 	if forceSeq > 0 {
 		seq = forceSeq
 	} else {
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?`, runID).Scan(&seq); err != nil {
-			return 0, err
+			return nil, err
 		}
 	}
+	redacted := Redact(payload)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO events(run_id, seq, node_id, etype, from_state, to_state, attempt_id, payload, created_at)
 		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		runID, seq, nodeID, string(typ), from, to, attemptID, Redact(payload), now.UnixMilli()); err != nil {
-		return 0, err
+		runID, seq, nodeID, string(typ), from, to, attemptID, redacted, now.UnixMilli()); err != nil {
+		return nil, err
 	}
-	return seq, nil
+	return &Event{
+		Seq:       seq,
+		RunID:     runID,
+		NodeID:    nodeID,
+		Type:      typ,
+		From:      graph.State(from),
+		To:        graph.State(to),
+		AttemptID: attemptID,
+		Payload:   json.RawMessage(redacted),
+		CreatedAt: now.UnixMilli(),
+	}, nil
 }
 
 // Events returns the full event log of a run in sequence order.
 func (s *Store) Events(ctx context.Context, runID string) ([]Event, error) {
+	return s.EventsAfter(ctx, runID, 0)
+}
+
+// EventsAfter returns the events of a run with seq greater than after, in
+// sequence order. It backs both replay and the live-event SSE cursor.
+func (s *Store) EventsAfter(ctx context.Context, runID string, after int64) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT seq, node_id, etype, from_state, to_state, attempt_id, payload, created_at
-		 FROM events WHERE run_id = ? ORDER BY seq`, runID)
+		 FROM events WHERE run_id = ? AND seq > ? ORDER BY seq`, runID, after)
 	if err != nil {
 		return nil, err
 	}
@@ -524,6 +651,63 @@ func Redact(s string) string {
 	if s == "" {
 		return s
 	}
+	if json.Valid([]byte(s)) {
+		var value any
+		decoder := json.NewDecoder(strings.NewReader(s))
+		decoder.UseNumber()
+		if decoder.Decode(&value) == nil {
+			value = redactJSON(value)
+			if out, err := json.Marshal(value); err == nil {
+				return string(out)
+			}
+		}
+	}
+	return redactText(s)
+}
+
+func redactJSON(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if secretKey(key) {
+				value[key] = "[REDACTED]"
+				continue
+			}
+			value[key] = redactJSON(item)
+		}
+	case []any:
+		for i, item := range value {
+			value[i] = redactJSON(item)
+		}
+	case string:
+		return redactText(value)
+	}
+	return value
+}
+
+func secretKey(key string) bool {
+	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+	for _, marker := range []string{"apikey", "password", "passwd", "secret", "authorization", "privatekey", "accesskey"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	// Token accounting fields are telemetry, not credentials. Other token
+	// keys (accessToken, refreshToken, tokenValue, etc.) are secrets.
+	accounting := map[string]bool{
+		"tokens": true, "tokencount": true, "maxtokens": true,
+		"prompttokens": true, "completiontokens": true, "totaltokens": true,
+		"inputtokens": true, "outputtokens": true, "reasoningtokens": true,
+		"cachedtokens": true, "cachecreationtokens": true,
+		"cachereadtokens": true, "cachewritetokens": true,
+	}
+	if strings.Contains(key, "token") && !accounting[key] {
+		return true
+	}
+	return false
+}
+
+func redactText(s string) string {
 	repl := []struct{ re, to string }{
 		{`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`, "bearer [REDACTED]"},
 		{`(?i)api[_-]?key["']?\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{6,}`, "apiKey [REDACTED]"},

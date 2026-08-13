@@ -16,6 +16,7 @@ import (
 
 	"corral/internal/livetest"
 	"corral/internal/tui"
+	"corral/internal/worktree"
 )
 
 // captureOutput runs fn with stdout redirected and returns its output.
@@ -148,17 +149,38 @@ func TestDoctorPassesWithDaemonUp(t *testing.T) {
 }
 
 func TestExportCommand(t *testing.T) {
-	// Fake daemon serving a minimal export.
+	// Fake daemon serving a minimal export and recording the bearer key.
 	payload := `{"runID":"run_1","status":"completed","events":[],"attempts":{},"artifacts":{}}`
+	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		w.Write([]byte(payload))
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("CORRAL_DAEMON_URL", srv.URL)
+	t.Setenv("CORRAL_DAEMON_KEY", "")
 
-	outFile := filepath.Join(t.TempDir(), "audit.json")
+	// Serve the key from the repository, as status/tui/doctor do.
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".corral"), 0o755)
+	if err := os.WriteFile(filepath.Join(dir, ".corral", "api.key"), []byte("repo-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	outFile := filepath.Join(dir, "audit.json")
 	if err := exportCmd("run_1", outFile); err != nil {
 		t.Fatalf("export: %v", err)
+	}
+	if gotKey != "repo-key" {
+		t.Fatalf("export used key %q, want repo key from .corral/api.key", gotKey)
 	}
 	data, err := os.ReadFile(outFile)
 	if err != nil {
@@ -169,12 +191,44 @@ func TestExportCommand(t *testing.T) {
 	}
 }
 
+func TestExportCommandEnvOverride(t *testing.T) {
+	// The env var must still override the repository key.
+	payload := `{"runID":"run_1","status":"completed","events":[],"attempts":{},"artifacts":{}}`
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		w.Write([]byte(payload))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("CORRAL_DAEMON_URL", srv.URL)
+	t.Setenv("CORRAL_DAEMON_KEY", "env-key")
+
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".corral"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".corral", "api.key"), []byte("repo-key\n"), 0o600)
+
+	outFile := filepath.Join(dir, "audit.json")
+	if err := exportCmd("run_1", outFile); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if gotKey != "env-key" {
+		t.Fatalf("export used key %q, want env override", gotKey)
+	}
+}
+
 func TestInitMergesExistingOpenCodeConfig(t *testing.T) {
 	dir := gitRepo(t)
 	// Pre-existing opencode.json with custom settings must be preserved.
 	existing := `{
 		"theme": "dark",
-		"agent": {"build": {"model": "custom/model"}}
+		"agent": {
+			"build": {"model": "custom/model"},
+			"corral-orchestrator": {
+				"model": "custom/orchestrator",
+				"tools": {"bash": true},
+				"permission": {"*": "allow"}
+			}
+		}
 	}`
 	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(existing), 0o644); err != nil {
 		t.Fatal(err)
@@ -198,6 +252,17 @@ func TestInitMergesExistingOpenCodeConfig(t *testing.T) {
 		if agents[name] == nil {
 			t.Fatalf("corral agent %s missing: %s", name, data)
 		}
+	}
+	orchestrator := agents["corral-orchestrator"].(map[string]any)
+	if orchestrator["model"] != "custom/orchestrator" {
+		t.Fatalf("safe model customization lost: %s", data)
+	}
+	if _, ok := orchestrator["tools"]; ok {
+		t.Fatalf("legacy permissive tools survived managed-agent refresh: %s", data)
+	}
+	permission := orchestrator["permission"].(map[string]any)
+	if permission["*"] != "deny" || permission["corral_start"] != "allow" {
+		t.Fatalf("orchestrator policy was not hardened: %s", data)
 	}
 }
 
@@ -257,6 +322,148 @@ func TestUpCmdSpawnsHealthyDaemon(t *testing.T) {
 	}
 	// Kill it.
 	_ = exec.Command("pkill", "-f", "corral daemon --port "+fmt.Sprint(port)).Run()
+}
+
+func TestSchedOptsDefaultsAndOverrides(t *testing.T) {
+	for _, name := range []string{
+		"CORRAL_BREAKER_MAX_FAILURES", "CORRAL_BREAKER_WINDOW",
+		"CORRAL_RUN_MAX_TOKENS", "CORRAL_RUN_MAX_COST",
+	} {
+		t.Setenv(name, "")
+	}
+	o := schedOpts(nil)
+	if o.Concurrency != 4 {
+		t.Fatalf("Concurrency = %d, want 4 (fixed wiring)", o.Concurrency)
+	}
+	if o.Worktrees != nil {
+		t.Fatalf("Worktrees = %v, want nil (as passed in)", o.Worktrees)
+	}
+	if o.BreakerMaxFailures != 5 {
+		t.Fatalf("BreakerMaxFailures = %d, want default 5", o.BreakerMaxFailures)
+	}
+	if o.BreakerWindow != 15*time.Minute {
+		t.Fatalf("BreakerWindow = %s, want default 15m", o.BreakerWindow)
+	}
+	if o.RunMaxTokens != 1_000_000 {
+		t.Fatalf("RunMaxTokens = %d, want default 1000000", o.RunMaxTokens)
+	}
+	if o.RunMaxCost != 100 {
+		t.Fatalf("RunMaxCost = %v, want default 100", o.RunMaxCost)
+	}
+
+	// Overrides apply.
+	t.Setenv("CORRAL_BREAKER_MAX_FAILURES", "3")
+	t.Setenv("CORRAL_BREAKER_WINDOW", "60")
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "5000")
+	t.Setenv("CORRAL_RUN_MAX_COST", "0.25")
+	o = schedOpts(nil)
+	if o.BreakerMaxFailures != 3 {
+		t.Fatalf("BreakerMaxFailures = %d, want 3", o.BreakerMaxFailures)
+	}
+	if o.BreakerWindow != time.Minute {
+		t.Fatalf("BreakerWindow = %s, want 1m", o.BreakerWindow)
+	}
+	if o.RunMaxTokens != 5000 {
+		t.Fatalf("RunMaxTokens = %d, want 5000", o.RunMaxTokens)
+	}
+	if o.RunMaxCost != 0.25 {
+		t.Fatalf("RunMaxCost = %v, want 0.25", o.RunMaxCost)
+	}
+
+	// 0 disables a safeguard rather than falling back to the default.
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "0")
+	t.Setenv("CORRAL_BREAKER_MAX_FAILURES", "0")
+	o = schedOpts(nil)
+	if o.RunMaxTokens != 0 || o.BreakerMaxFailures != 0 {
+		t.Fatalf("zero should disable safeguards: %+v", o)
+	}
+
+	// Unparsable values fall back to the defaults.
+	t.Setenv("CORRAL_RUN_MAX_TOKENS", "banana")
+	t.Setenv("CORRAL_RUN_MAX_COST", "not-a-number")
+	t.Setenv("CORRAL_BREAKER_WINDOW", "soon")
+	o = schedOpts(nil)
+	if o.RunMaxTokens != 1_000_000 || o.RunMaxCost != 100 || o.BreakerWindow != 15*time.Minute {
+		t.Fatalf("unparsable env should fall back to defaults: %+v", o)
+	}
+}
+
+func TestWorktreesCommand(t *testing.T) {
+	repo := gitRepo(t)
+	ctx := context.Background()
+	wtm := worktree.NewManager(repo)
+	path, err := wtm.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureOutput(t, func() { err = worktreesCmdWithDir(repo, false, 0) })
+	if err != nil {
+		t.Fatalf("worktrees: %v", err)
+	}
+	if !strings.Contains(out, "corral/r1/w1/1") {
+		t.Fatalf("listing missing branch:\n%s", out)
+	}
+	if strings.Contains(out, "pruned") {
+		t.Fatalf("listing pruned unexpectedly:\n%s", out)
+	}
+
+	// Nothing is merged or stale, so --prune removes nothing.
+	out = captureOutput(t, func() { err = worktreesCmdWithDir(repo, true, 0) })
+	if err != nil {
+		t.Fatalf("worktrees --prune: %v", err)
+	}
+	if !strings.Contains(out, "nothing to prune") {
+		t.Fatalf("prune output wrong:\n%s", out)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("worktree dir removed: %v", err)
+	}
+}
+
+func TestWorktreesCommandPrunesMerged(t *testing.T) {
+	repo := gitRepo(t)
+	ctx := context.Background()
+	wtm := worktree.NewManager(repo)
+	path, err := wtm.Add(ctx, "corral/r1/w1/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := wtm.CommitWorktree(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := wtm.MergeBranch(ctx, "corral/r1/w1/1"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureOutput(t, func() { err = worktreesCmdWithDir(repo, true, 0) })
+	if err != nil {
+		t.Fatalf("worktrees --prune: %v", err)
+	}
+	if !strings.Contains(out, "pruned") || !strings.Contains(out, "corral/r1/w1/1") {
+		t.Fatalf("prune output wrong:\n%s", out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("merged worktree dir not removed: %v", err)
+	}
+	// Main checkout untouched.
+	if data, err := os.ReadFile(filepath.Join(repo, "a.txt")); err != nil || string(data) != "hello" {
+		t.Fatalf("main checkout wrong: %v %q", err, data)
+	}
+}
+
+func TestWorktreesCommandEmpty(t *testing.T) {
+	repo := gitRepo(t)
+	out := captureOutput(t, func() { _ = worktreesCmdWithDir(repo, false, 0) })
+	if !strings.Contains(out, "no attempt worktrees") {
+		t.Fatalf("empty listing output wrong:\n%s", out)
+	}
 }
 
 func TestVersionAtLeast(t *testing.T) {
