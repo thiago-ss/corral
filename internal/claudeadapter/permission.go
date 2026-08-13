@@ -227,6 +227,8 @@ func (b *permissionBroker) handle(conn net.Conn) {
 	}
 	b.pending[key] = ch
 	at.permission = req.RequestID
+	at.permissionTool = sanitizePermissionText(req.ToolName, 200)
+	at.permissionInput = sanitizePermissionText(string(req.ToolInput), 2000)
 	at.mu.Unlock()
 	b.mu.Unlock()
 
@@ -246,9 +248,24 @@ func (b *permissionBroker) handle(conn net.Conn) {
 	at.mu.Lock()
 	if at.permission == req.RequestID {
 		at.permission = ""
+		at.permissionTool = ""
+		at.permissionInput = ""
 	}
 	at.mu.Unlock()
 	_ = enc.Encode(reply)
+}
+
+func sanitizePermissionText(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || (r >= 0x20 && r != 0x7f) {
+			return r
+		}
+		return -1
+	}, s)
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
 
 // respond claims and resolves the helper waiting on requestID. Missing and

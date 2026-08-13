@@ -230,7 +230,7 @@ func TestPermissionRespond(t *testing.T) {
 	d.States["w1"] = "blocked"
 	d.Events = append(d.Events, EventView{
 		Seq: 2, NodeID: "w1", Type: "transition", From: "running", To: "blocked",
-		Payload: json.RawMessage(`{"reason":"permission","permissionID":"perm-9"}`),
+		Payload: json.RawMessage(`{"reason":"permission","permissionID":"perm-9","tool":"Bash","input":"{\"command\":\"git status\"}"}`),
 	})
 	api := &fakeAPI{}
 	m := New(api, context.Background())
@@ -242,11 +242,17 @@ func TestPermissionRespond(t *testing.T) {
 
 	// The pending permission is surfaced in the detail view.
 	view := m.View()
-	for _, want := range []string{"perm:perm-9", "p allow perm", "d deny perm"} {
+	for _, want := range []string{"perm:perm-9", "Bash", "p allow perm", "d deny perm"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail view missing %q:\n%s", want, view)
 		}
 	}
+	m.mode = modeInspect
+	m.inspectNode = "w1"
+	if view = m.View(); !strings.Contains(view, "git status") {
+		t.Fatalf("inspect view missing permission input:\n%s", view)
+	}
+	m.mode = modeDetail
 
 	send(t, m, key("p"))
 	send(t, m, key("d"))

@@ -104,9 +104,11 @@ type attempt struct {
 	exitedCh  chan processExit // stream reader -> watcher after stdout is drained
 	cancel    context.CancelFunc
 
-	mu         sync.Mutex
-	transcript []adapter.Message
-	permission string // pending permission request id ("" = none); at most one request is admitted
+	mu              sync.Mutex
+	transcript      []adapter.Message
+	permission      string // pending permission request id ("" = none); at most one request is admitted
+	permissionTool  string
+	permissionInput string
 }
 
 func New(opts Options) *Driver {
@@ -940,6 +942,16 @@ func allowedTools(a adapter.Attempt) []string {
 		}
 	}
 	return tools
+}
+
+func (s *session) PendingPermissionDetails(ctx context.Context) (adapter.PermissionDetails, bool, error) {
+	id, pending, err := s.PendingPermission(ctx)
+	if err != nil || !pending {
+		return adapter.PermissionDetails{}, false, err
+	}
+	s.at.mu.Lock()
+	defer s.at.mu.Unlock()
+	return adapter.PermissionDetails{ID: id, Tool: s.at.permissionTool, Input: s.at.permissionInput}, true, nil
 }
 
 // newUUID returns a v4 UUID used as the claude --session-id.

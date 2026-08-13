@@ -461,11 +461,11 @@ func (m *Model) nodeAction(label string, fn func(context.Context, string, string
 	})
 }
 
-// pendingPermission returns the permission id the node is currently blocked
-// on, if its latest blocked transition carried a permission request.
-func (m *Model) pendingPermission(nodeID string) (string, bool) {
+// pendingPermissionDetails returns the permission request the node is
+// currently blocked on, if its latest blocked transition carried one.
+func (m *Model) pendingPermissionDetails(nodeID string) (string, string, string, bool) {
 	if m.detail == nil || m.detail.States[nodeID] != "blocked" {
-		return "", false
+		return "", "", "", false
 	}
 	for i := len(m.detail.Events) - 1; i >= 0; i-- {
 		ev := m.detail.Events[i]
@@ -475,15 +475,24 @@ func (m *Model) pendingPermission(nodeID string) (string, bool) {
 		var p struct {
 			Reason       string `json:"reason"`
 			PermissionID string `json:"permissionID"`
+			Tool         string `json:"tool"`
+			Input        string `json:"input"`
 		}
 		if json.Unmarshal(ev.Payload, &p) == nil && p.Reason == "permission" && p.PermissionID != "" {
-			return p.PermissionID, true
+			return p.PermissionID, p.Tool, p.Input, true
 		}
 		// Only the latest transition into blocked describes why the
 		// current blocked state exists. Never fall back to an older request.
-		return "", false
+		return "", "", "", false
 	}
-	return "", false
+	return "", "", "", false
+}
+
+// pendingPermission returns the permission id the node is currently blocked
+// on, if its latest blocked transition carried a permission request.
+func (m *Model) pendingPermission(nodeID string) (string, bool) {
+	id, _, _, ok := m.pendingPermissionDetails(nodeID)
+	return id, ok
 }
 
 // permissionAction answers the pending permission of the node under the

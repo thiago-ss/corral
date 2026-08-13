@@ -181,8 +181,11 @@ func (m *Model) nodeLine(n GraphNode, deps int) string {
 	}
 	permS := ""
 	if state == "blocked" {
-		if pid, ok := m.pendingPermission(n.ID); ok {
+		if pid, tool, _, ok := m.pendingPermissionDetails(n.ID); ok {
 			permS = styleTitle.Render(fmt.Sprintf("perm:%s", safeText(pid)))
+			if tool != "" {
+				permS += styleMuted.Render(" " + safeText(tool))
+			}
 		}
 	}
 	bar := m.nodeBudgetBar(n, atts, state)
@@ -350,8 +353,15 @@ func (m *Model) viewInspect() string {
 		}
 		b.WriteString(styleDim.Render("verification: ") + safeText(n.Verification.Kind) + " " + strings.Join(command, " ") + "\n")
 	}
-	if pid, ok := m.pendingPermission(n.ID); ok {
-		b.WriteString(styleDim.Render("permission: ") + styleTitle.Render(safeText(pid)) + styleMuted.Render(" pending — p allow · d deny") + "\n")
+	if pid, tool, input, ok := m.pendingPermissionDetails(n.ID); ok {
+		b.WriteString(styleDim.Render("permission: ") + styleTitle.Render(safeText(pid)))
+		if tool != "" {
+			b.WriteString(styleMuted.Render(" tool=" + safeText(tool)))
+		}
+		if input != "" {
+			b.WriteString(styleMuted.Render(" input=" + shortLine(safeText(input), 100)))
+		}
+		b.WriteString(styleMuted.Render(" pending — p allow · d deny") + "\n")
 	}
 	b.WriteString("\n" + styleDim.Render("attempts") + "\n")
 	for _, at := range m.detail.Attempts[n.ID] {

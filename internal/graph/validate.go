@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -69,6 +70,19 @@ func validateNode(n *Node) error {
 		return fmt.Errorf("objective exceeds %d chars", maxObjectiveLen)
 	}
 	if n.Type == NodeAgent {
+		switch n.Role {
+		case "", "worker", "reviewer":
+		default:
+			return fmt.Errorf("invalid agent role %q", n.Role)
+		}
+		if n.Role == "reviewer" && len(n.WriteScope) > 0 {
+			return fmt.Errorf("reviewer agent cannot declare write scope")
+		}
+		for _, scope := range n.WriteScope {
+			if err := validateWriteScope(scope); err != nil {
+				return err
+			}
+		}
 		if len(n.AcceptanceCriteria) == 0 {
 			return fmt.Errorf("agent node missing acceptance criteria")
 		}
@@ -118,6 +132,27 @@ func validateNode(n *Node) error {
 		if v.Kind == "reviewer" && v.Reviewer == "" {
 			return fmt.Errorf("reviewer verification missing reviewer node")
 		}
+	}
+	return nil
+}
+
+func validateWriteScope(scope string) error {
+	scope = strings.TrimSpace(strings.ReplaceAll(scope, `\`, "/"))
+	if scope == "" {
+		return fmt.Errorf("empty write scope")
+	}
+	if scope == "*" {
+		return nil
+	}
+	if filepath.IsAbs(filepath.FromSlash(scope)) {
+		return fmt.Errorf("write scope %q must be relative", scope)
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(scope)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("write scope %q escapes worktree", scope)
+	}
+	if strings.ContainsAny(clean, "*?[") {
+		return fmt.Errorf("write scope %q contains unsupported wildcard", scope)
 	}
 	return nil
 }

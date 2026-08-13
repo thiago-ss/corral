@@ -429,7 +429,14 @@ func (h *RunHandle) Step(ctx context.Context) error {
 			rec.budgetPaused = true
 		}
 		rec.budgeted = false
-		payload, _ := json.Marshal(map[string]any{"reason": "permission", "permissionID": pid})
+		permission := map[string]any{"reason": "permission", "permissionID": pid}
+		if info, ok := rec.sess.(adapter.PermissionInfo); ok {
+			if detail, detailOK, detailErr := info.PendingPermissionDetails(ctx); detailErr == nil && detailOK {
+				permission["tool"] = detail.Tool
+				permission["input"] = detail.Input
+			}
+		}
+		payload, _ := json.Marshal(permission)
 		if err := h.transit(ctx, id, graph.StateRunning, graph.StateBlocked, string(payload)); err != nil {
 			return err
 		}
@@ -1233,9 +1240,29 @@ func (h *RunHandle) finishAttempt(ctx context.Context, res Result) error {
 		return err
 	}
 	node := h.nodeByID(rec.nodeID)
-	verdict, err := h.s.ver.Verdict(ctx, node, rec.no, rec.worktree, res.Messages)
-	if err != nil {
-		verdict = Verdict{Pass: false, Feedback: "verifier error: " + err.Error()}
+	var verdict Verdict
+	if rec.worktree != "" && h.s.opts.Worktrees != nil && worktree.NodeIsWriting(string(node.Type), node.Role) {
+		files, scopeErr := h.s.opts.Worktrees.ChangedFiles(ctx, rec.worktree)
+		if scopeErr != nil {
+			verdict = Verdict{Pass: false, Feedback: "scope inspection failed: " + scopeErr.Error()}
+		} else {
+			var outside []string
+			for _, file := range files {
+				if !worktree.ScopeContains(node.WriteScope, file) {
+					outside = append(outside, file)
+				}
+			}
+			if len(outside) > 0 {
+				verdict = Verdict{Pass: false, Feedback: "attempt changed paths outside write scope: " + strings.Join(outside, ", ")}
+			}
+		}
+	}
+	if verdict.Feedback == "" {
+		var err error
+		verdict, err = h.s.ver.Verdict(ctx, node, rec.no, rec.worktree, res.Messages)
+		if err != nil {
+			verdict = Verdict{Pass: false, Feedback: "verifier error: " + err.Error()}
+		}
 	}
 	ev, _ := json.Marshal(map[string]any{"pass": verdict.Pass, "feedback": verdict.Feedback, "evidence": verdict.Evidence})
 	if err := h.emitEvent(ctx, store.EventVerdict, rec.nodeID, graph.State(""), graph.State(""), rec.attemptID, string(ev)); err != nil {

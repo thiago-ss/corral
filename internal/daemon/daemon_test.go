@@ -143,6 +143,11 @@ func TestRoleEnforcement(t *testing.T) {
 	if code, _ := a.do("orchestrator", http.MethodPost, "/api/runs", map[string]any{"graph": g}); code != http.StatusCreated {
 		t.Fatalf("orchestrator create run: %d, want 201", code)
 	}
+	if code, body := a.do("orchestrator", http.MethodPost, "/api/runs", map[string]any{
+		"graph": g, "autoApproveGates": true,
+	}); code != http.StatusForbidden || !strings.Contains(body, "only an operator") {
+		t.Fatalf("orchestrator self-authorization: %d %s, want 403", code, body)
+	}
 	// Workers may not approve; operators may. (Run id from the created run.)
 	if code, _ := a.do("worker", http.MethodPost, "/api/runs/whatever/approve", map[string]any{"nodeID": "w1"}); code != http.StatusForbidden {
 		t.Fatalf("worker approve: %d, want 403", code)
@@ -368,6 +373,7 @@ func TestCancelAndRetryThroughAPI(t *testing.T) {
 
 	// Failed node retried through the API.
 	bad := workerNode("bad", "x.txt", "X")
+	bad.WriteScope = []string{"x.txt", "missing.txt"}
 	bad.Verification = &graph.Verification{Kind: "command", Command: []string{"test", "-f", "missing.txt"}}
 	bad.RetryPolicy = graph.RetryPolicy{MaxRetries: 0, Backoff: tick}
 	drv.AppendScript("bad", sched.Script{Delay: 100 * time.Millisecond, Write: map[string]string{"x.txt": "X"}})

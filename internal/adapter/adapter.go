@@ -110,6 +110,19 @@ type PermissionSession interface {
 	RespondPermission(ctx context.Context, id string, allow bool) error
 }
 
+// PermissionDetails carries the action an operator is about to authorize.
+// Providers that can expose it should implement PermissionInfo; the scheduler
+// includes it in blocked-state evidence so approvals are informed.
+type PermissionDetails struct {
+	ID    string
+	Tool  string
+	Input string
+}
+
+type PermissionInfo interface {
+	PendingPermissionDetails(context.Context) (PermissionDetails, bool, error)
+}
+
 // Event is a live stream item from a session, used for progress display
 // and for triggering verification once the attempt reaches idle.
 type Event struct {

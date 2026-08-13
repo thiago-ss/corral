@@ -132,7 +132,7 @@ func daemonCmd(port int, apiKey string) error {
 	// restart it on the same URL without breaking the adapter clients.
 	servePort := freePort()
 	var ocMu sync.Mutex
-	ocServer, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
+	ocServer, err := spike.StartServerWithConfig(ctx, dir, servePort, os.Stderr, assets.OpenCodeConfigJSON)
 	if err != nil {
 		return fmt.Errorf("start opencode server: %w", err)
 	}
@@ -151,7 +151,7 @@ func daemonCmd(port int, apiKey string) error {
 				return
 			}
 			time.Sleep(2 * time.Second)
-			ns, err := spike.StartServer(ctx, dir, servePort, os.Stderr)
+			ns, err := spike.StartServerWithConfig(ctx, dir, servePort, os.Stderr, assets.OpenCodeConfigJSON)
 			if err != nil {
 				log.Printf("opencode server restart failed: %v", err)
 				return
@@ -456,7 +456,9 @@ func initCmd(wantDir string) error {
 		}
 		fmt.Println("api key written:", keyFile)
 	}
-	cfg := map[string]any{"dir": dir, "apiKey": key, "daemonURL": daemonURL()}
+	// Keep the bearer token only in the mode-0600 api.key file. Config is
+	// project-readable metadata and must never duplicate authentication data.
+	cfg := map[string]any{"dir": dir, "daemonURL": daemonURL()}
 	if err := writeJSONFile(filepath.Join(corralDir, "config.json"), cfg); err != nil {
 		return err
 	}
@@ -489,7 +491,8 @@ func installPlugin(dir string) error {
 
 // installAgentConfig merges the corral agents (planner, orchestrator,
 // worker, reviewer, merger) into the project's opencode.json, preserving
-// any existing configuration. Existing agent entries are left untouched.
+// unrelated configuration. Managed agent definitions are refreshed on every
+// init so an older permissive policy cannot bypass current role boundaries.
 func installAgentConfig(dir string) error {
 	cfgPath := filepath.Join(dir, "opencode.json")
 	existing := map[string]any{}
@@ -513,9 +516,14 @@ func installAgentConfig(dir string) error {
 		existingAgents = map[string]any{}
 	}
 	for name, def := range agents {
-		if _, ok := existingAgents[name]; !ok {
-			existingAgents[name] = def
+		// Model selection is a safe user customization. All authority-bearing
+		// fields (permission/tools/mode) come from the embedded definition.
+		if current, ok := existingAgents[name].(map[string]any); ok {
+			if model, ok := current["model"]; ok {
+				def.(map[string]any)["model"] = model
+			}
 		}
+		existingAgents[name] = def
 	}
 	existing["agent"] = existingAgents
 	return writeJSONFile(cfgPath, existing)

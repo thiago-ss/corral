@@ -111,6 +111,15 @@ func (m *Manager) Files(ctx context.Context, worktree string) ([]string, error) 
 	return files, nil
 }
 
+// ChangedFiles lists tracked and untracked (non-ignored) paths changed from
+// HEAD. Intent-to-add makes untracked files visible without committing them.
+func (m *Manager) ChangedFiles(ctx context.Context, worktree string) ([]string, error) {
+	if _, err := m.git(ctx, worktree, "add", "-A", "--intent-to-add"); err != nil {
+		return nil, err
+	}
+	return m.Files(ctx, worktree)
+}
+
 // HashContent returns the content address of a patch.
 func HashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
@@ -426,6 +435,29 @@ func ScopesOverlap(a, b []string) bool {
 			if scopesTouch(x, y) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// ScopeContains reports whether path is covered by at least one declared
+// relative scope. Empty or "*" scopes intentionally mean the whole worktree.
+func ScopeContains(scopes []string, path string) bool {
+	path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(strings.TrimSpace(path))))
+	if path == "." || path == ".." || strings.HasPrefix(path, "../") || filepath.IsAbs(filepath.FromSlash(path)) {
+		return false
+	}
+	if len(scopes) == 0 {
+		return true
+	}
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(strings.ReplaceAll(scope, `\`, "/"))
+		if scope == "" || scope == "*" {
+			return true
+		}
+		scope = filepath.ToSlash(filepath.Clean(filepath.FromSlash(scope)))
+		if path == scope || strings.HasPrefix(path, scope+"/") {
+			return true
 		}
 	}
 	return false

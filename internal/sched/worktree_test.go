@@ -236,6 +236,27 @@ func TestFailedWorktreeRetainedForInspection(t *testing.T) {
 	}
 }
 
+func TestOutOfScopeWorktreeChangesCannotPass(t *testing.T) {
+	n := workerNode("bad-scope", "allowed.txt", "ok", "allowed.txt")
+	n.RetryPolicy.MaxRetries = 0
+	st, h, _, clk := setupIsolated(t, &graph.Graph{Nodes: []*graph.Node{n}}, map[string][]sched.Script{
+		"bad-scope": {{Delay: tick, Write: map[string]string{"outside.txt": "escape"}}},
+	})
+	ctx := context.Background()
+	for i := 0; i < 50 && !h.Done(); i++ {
+		if err := step(h, clk, ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state, _ := h.State("bad-scope"); state != graph.StateFailed {
+		t.Fatalf("out-of-scope state = %s, want failed", state)
+	}
+	atts := attemptsOf(t, st, "run-wt", "bad-scope")
+	if len(atts) == 0 || !strings.Contains(atts[len(atts)-1].Evidence, "outside write scope") {
+		t.Fatalf("scope failure evidence = %+v", atts)
+	}
+}
+
 func TestMergeRunsOnlyAfterApproval(t *testing.T) {
 	g := &graph.Graph{Nodes: []*graph.Node{
 		workerNode("w1", "a.txt", "A1", "a.txt"),

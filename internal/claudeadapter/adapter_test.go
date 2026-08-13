@@ -1144,6 +1144,10 @@ func TestPermissionBroker(t *testing.T) {
 	// The scheduler's view: the permission is pending and the session is
 	// permission-capable.
 	waitPending(t, ps, "req-1")
+	info, ok, err := sess.(adapter.PermissionInfo).PendingPermissionDetails(context.Background())
+	if err != nil || !ok || info.Tool != "Write" || !strings.Contains(info.Input, "src/alpha.txt") {
+		t.Fatalf("permission details = %+v, %v, %v", info, ok, err)
+	}
 
 	// Claude may issue tool calls concurrently. The adapter exposes one
 	// permission at a time, so a second request is denied immediately instead

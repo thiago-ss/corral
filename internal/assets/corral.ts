@@ -70,7 +70,6 @@ export const start = tool({
   description: "Start a corral run from an approved graph.",
   args: {
     graph: tool.schema.string().describe("Graph JSON (as returned by corral_plan)"),
-    autoApproveGates: tool.schema.boolean().optional().describe("When true, the run is pre-authorized: the orchestrator approves human gates itself as they are reached, without waiting for the operator"),
   },
   async execute(args, context) {
     let parsed: unknown
@@ -83,9 +82,7 @@ export const start = tool({
       typeof parsed === "object" && parsed !== null && "graph" in parsed
         ? (parsed as { graph: unknown }).graph
         : parsed
-    const body: Record<string, unknown> = { graph }
-    if (args.autoApproveGates !== undefined) body.autoApproveGates = args.autoApproveGates
-    return call("/api/runs", body, roleFor(context.agent))
+    return call("/api/runs", { graph }, roleFor(context.agent))
   },
 })
 

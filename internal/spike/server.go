@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -19,6 +20,14 @@ type Server struct {
 // StartServer starts an opencode serve process. port 0 picks a free port;
 // a fixed port allows restarts on the same URL (daemon watchdog).
 func StartServer(ctx context.Context, workdir string, port int, stderr io.Writer) (*Server, error) {
+	return StartServerWithConfig(ctx, workdir, port, stderr, "")
+}
+
+// StartServerWithConfig starts OpenCode with trusted managed agent policy
+// injected through OPENCODE_CONFIG_CONTENT. The environment-level config is
+// available for sessions whose directory is a generated worktree, where the
+// main checkout's ignored opencode.json is intentionally absent.
+func StartServerWithConfig(ctx context.Context, workdir string, port int, stderr io.Writer, configContent string) (*Server, error) {
 	bin := "opencode"
 	var cmd *exec.Cmd
 	var base string
@@ -34,6 +43,9 @@ func StartServer(ctx context.Context, workdir string, port int, stderr io.Writer
 
 		cmd = exec.CommandContext(ctx, bin, "serve", "--port", fmt.Sprint(port), "--hostname", "127.0.0.1")
 		cmd.Dir = workdir
+		if configContent != "" {
+			cmd.Env = append(os.Environ(), "OPENCODE_CONFIG_CONTENT="+configContent)
+		}
 		if stderr != nil {
 			cmd.Stderr = stderr
 		}

@@ -32,17 +32,9 @@ func NewOpenCodePlanner(oc *ocx.Client, model string, timeout time.Duration) *Op
 // anything that executes or writes is disabled. This prevents tool loops
 // that stall planning.
 var planTools = map[string]bool{
-	"bash":        false,
-	"edit":        false,
-	"write":       false,
-	"apply_patch": false,
-	"webfetch":    false,
-	"websearch":   false,
-	"task":        false,
-	"todowrite":   false,
-	"question":    false,
-	"skill":       false,
-	"lsp":         false,
+	"*":    false,
+	"read": true,
+	"glob": true,
 }
 
 var errNoGraph = errors.New("planner produced no valid graph")

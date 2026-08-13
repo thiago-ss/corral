@@ -14,9 +14,9 @@ flow is verified end-to-end against a real OpenCode server.
     agent roles, default acceptance criteria) before `graph.Validate`.
   - `POST /api/runs` — start a run from a graph; run loops live on the
     daemon context (not request context — bug found and fixed) and
-    persist via SQLite. Accepts `autoApproveGates` (stored on the run and
-    exposed by `GET /api/runs/{id}`); gates remain explicit, and the flag
-    authorizes the orchestrator to call the normal approval endpoint.
+    persist via SQLite. An operator-only `autoApproveGates` option is stored
+    on the run and exposed by `GET /api/runs/{id}`; gates remain explicit,
+    and model agents cannot mint this authority themselves.
   - `GET /api/runs`, `GET /api/runs/{id}` — follow execution (states,
     attempts, event log).
   - `GET /api/runs/{id}/watch` — bounded JSON long-poll of run deltas from a
@@ -38,17 +38,17 @@ flow is verified end-to-end against a real OpenCode server.
   `opencode serve`, wires store + adapter + worktrees + verifier.
 - `.opencode/tools/corral.ts` — the thin plugin: `corral_plan`,
   `corral_start` (accepts the raw graph *or* the full `corral_plan` output,
-  unwrapping a leading `{"graph": ...}` wrapper, plus an optional
-  `autoApproveGates` flag), `corral_status`, `corral_watch` (blocks on the
+  unwrapping a leading `{"graph": ...}` wrapper), `corral_status`,
+  `corral_watch` (blocks on the
   daemon long-poll endpoint and returns the first run delta — node transition,
   gate awaiting approval, or run done — or times out), `corral_approve`,
   `corral_reject`, `corral_cancel`, `corral_retry`, `corral_steer`, calling
   the daemon and mapping the session agent (`corral-*`) to a role.
 - `example/opencode.json` — agent role configuration using OpenCode's
-  per-agent permissions: orchestrator (deny edit/bash, allow corral_*),
-  planner (read-only + corral_plan), worker (ask edits/bash), reviewer
-  (deny all tools; evaluates supplied evidence only), merger (deny
-  edit; bash allow only `git status/log/diff`, ask merge/checkout/branch).
+  fail-closed per-agent permissions: every role starts with wildcard deny;
+  orchestrator allows only corral_*, planner only corral_plan, worker allows
+  read/glob and asks for edits/bash, reviewer denies all tools, and merger
+  allows only restricted git commands.
 
 ## Acceptance verification
 

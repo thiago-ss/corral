@@ -226,6 +226,13 @@ func (d *Daemon) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "graph required", http.StatusBadRequest)
 		return
 	}
+	if req.AutoApproveGates {
+		role, _ := parseRole(r.Header.Get("X-Corral-Role"))
+		if role != RoleOperator {
+			http.Error(w, "only an operator may pre-authorize human gates", http.StatusForbidden)
+			return
+		}
+	}
 	ctx := r.Context()
 	runID := "run_" + randID(6)
 	h, err := d.sched.Create(ctx, runID, req.Graph, sched.CreateOptions{AutoApproveGates: req.AutoApproveGates})

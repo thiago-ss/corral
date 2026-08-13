@@ -87,9 +87,9 @@ Inside OpenCode:
 2. Review the returned graph.
 3. Switch to `corral-orchestrator` and ask it to start that graph.
 4. Follow progress with `corral_status` / `corral_watch`; approve, reject,
-   retry, cancel, or steer nodes when needed. `corral_start` accepts an
-   optional `autoApproveGates` flag that pre-authorizes the orchestrator to call
-   the normal gate approval endpoint without waiting for the operator.
+   retry, cancel, or steer nodes when needed. Trusted operator API clients may
+   set `autoApproveGates` when creating a run; model agents cannot grant that
+   authority to themselves.
 
 Or follow the same run from the terminal:
 

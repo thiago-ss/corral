@@ -157,6 +157,13 @@ func (d *Driver) clientFor(cwd string) *ocx.Client {
 // Start creates an OpenCode session, sends the objective, and starts a
 // watcher that completes the attempt via events + polling fallback.
 func (d *Driver) Start(ctx context.Context, a adapter.Attempt) (adapter.Session, error) {
+	role := a.Role
+	if role == "" {
+		role = "worker"
+	}
+	if role != "worker" && role != "reviewer" {
+		return nil, fmt.Errorf("start OpenCode: unsupported agent role %q", a.Role)
+	}
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -252,7 +259,7 @@ func (d *Driver) Start(ctx context.Context, a adapter.Attempt) (adapter.Session,
 	if model == "" {
 		model = d.opts.Model
 	}
-	if err := client.PromptAsync(ctx, sess.ID, prompt, model); err != nil {
+	if err := client.PromptAsyncAgent(ctx, sess.ID, prompt, model, "corral-"+role); err != nil {
 		atCancel()
 		at.cleanup()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

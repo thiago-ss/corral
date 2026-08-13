@@ -70,6 +70,12 @@ func TestParseGraphFromResponse(t *testing.T) {
 	}
 }
 
+func TestPlannerToolsFailClosed(t *testing.T) {
+	if planTools["*"] || !planTools["read"] || !planTools["glob"] || len(planTools) != 3 {
+		t.Fatalf("planner tools = %#v, want wildcard deny plus read/glob", planTools)
+	}
+}
+
 func TestFindJSONEnd(t *testing.T) {
 	s := `{"a": {"b": [1, {"c": "} { "}]}} tail`
 	if end := findJSONEnd(s, 0); end != len(s)-5 {

@@ -221,7 +221,14 @@ func TestInitMergesExistingOpenCodeConfig(t *testing.T) {
 	// Pre-existing opencode.json with custom settings must be preserved.
 	existing := `{
 		"theme": "dark",
-		"agent": {"build": {"model": "custom/model"}}
+		"agent": {
+			"build": {"model": "custom/model"},
+			"corral-orchestrator": {
+				"model": "custom/orchestrator",
+				"tools": {"bash": true},
+				"permission": {"*": "allow"}
+			}
+		}
 	}`
 	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(existing), 0o644); err != nil {
 		t.Fatal(err)
@@ -245,6 +252,17 @@ func TestInitMergesExistingOpenCodeConfig(t *testing.T) {
 		if agents[name] == nil {
 			t.Fatalf("corral agent %s missing: %s", name, data)
 		}
+	}
+	orchestrator := agents["corral-orchestrator"].(map[string]any)
+	if orchestrator["model"] != "custom/orchestrator" {
+		t.Fatalf("safe model customization lost: %s", data)
+	}
+	if _, ok := orchestrator["tools"]; ok {
+		t.Fatalf("legacy permissive tools survived managed-agent refresh: %s", data)
+	}
+	permission := orchestrator["permission"].(map[string]any)
+	if permission["*"] != "deny" || permission["corral_start"] != "allow" {
+		t.Fatalf("orchestrator policy was not hardened: %s", data)
 	}
 }
 
