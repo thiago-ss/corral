@@ -6,7 +6,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/thiago-ss/corral/ci.yml?branch=main&style=flat-square&label=CI&labelColor=191A16&color=1F7A50)](https://github.com/thiago-ss/corral/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/thiago-ss/corral?style=flat-square&labelColor=191A16&color=D8890B)](https://github.com/thiago-ss/corral/releases) [![Go](https://img.shields.io/badge/Go-1.26.5-2B63D9?style=flat-square&labelColor=191A16)](https://go.dev) [![License](https://img.shields.io/badge/license-MIT-1F7A50?style=flat-square&labelColor=191A16)](LICENSE)
 
-[Why Corral](#why-corral) · [Default run](#the-default-run) · [Install](#quick-start) · [Architecture](#how-trust-is-built)
+[Why Corral](#why-corral) · [Default run](#the-default-run) · [Install](#quick-start) · [Codex](docs/codex.md) · [Changelog](CHANGELOG.md) · [Architecture](#how-trust-is-built)
 
 **[Install and run →](#quick-start)**
 
@@ -90,6 +90,12 @@ Inside OpenCode:
    retry, cancel, or steer nodes when needed. Trusted operator API clients may
    set `autoApproveGates` when creating a run; model agents cannot grant that
    authority to themselves.
+
+From Codex, use the terminal as the operator: run `corral up`, review a graph
+through `/api/plan`, start it through `/api/runs`, and monitor it with
+`corral tui` or `corral status`. The complete copy/paste flow, gate commands,
+and operator prompt pattern live in [`docs/codex.md`](docs/codex.md). Codex is
+not yet a native Corral executor; OpenCode runs the isolated worker sessions.
 
 Or follow the same run from the terminal:
 
