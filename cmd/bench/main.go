@@ -36,6 +36,19 @@ func main() {
 	fmt.Printf("  corral resume: %d\n", resume)
 	fmt.Printf("  saved: %.1fx\n\n", float64(naive)/float64(resume))
 
+	// Concurrency scaling: same 8-task graph at increasing worker
+	// counts. Shows where added workers stop buying wall time.
+	fmt.Printf("concurrency scaling — 8 independent tasks\n")
+	fmt.Printf("  %-12s %-8s %-8s %s\n", "workers", "ticks", "speedup", "efficiency")
+	base := run(8, 1)
+	for _, c := range []int{1, 2, 4, 8} {
+		ticks := run(8, c)
+		speedup := float64(base) / float64(ticks)
+		fmt.Printf("  %-12d %-8d %-8s %.0f%%\n",
+			c, ticks, fmt.Sprintf("%.1fx", speedup), speedup/float64(c)*100)
+	}
+	fmt.Println()
+
 	// Verification: of 10 agents that "said done", how many actually
 	// failed their evidence gate in the simulation?
 	fmt.Printf("evidence gates vs trusting the prose\n")
