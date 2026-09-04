@@ -2,7 +2,7 @@ BIN    := corral
 PREFIX ?= $(HOME)/.local/bin
 GO     ?= go
 
-.PHONY: build install test test-live race vet demo clean
+.PHONY: build install test test-live race vet bench figure demo clean
 
 build: ## build the corral binary
 	$(GO) build -o $(BIN) ./cmd/corral
@@ -22,6 +22,9 @@ race: ## deterministic tests under the race detector
 
 bench: ## deterministic benchmark (README numbers)
 	$(GO) run ./cmd/bench
+
+figure: ## regenerate the README benchmark figure from live bench output
+	$(GO) run ./cmd/bench | python3 scripts/make_bench_figure.py
 
 vet: ## go vet + gofmt check
 	$(GO) vet ./...
