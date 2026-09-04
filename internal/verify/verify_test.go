@@ -220,3 +220,28 @@ func TestCheckNodeVerdictFromMeta(t *testing.T) {
 		t.Fatalf("passing check verdict wrong: %+v", res)
 	}
 }
+
+func TestExecRunnerReportsStartFailure(t *testing.T) {
+	// A command whose binary does not exist must not be reported as a
+	// successful run: callers treat a non-nil error as "could not start",
+	// and must never see a clean exit 0 for a check that never ran.
+	exit, stdout, stderr, err := ExecRunner{}.Run(context.Background(), t.TempDir(), []string{"definitely-not-a-real-binary-xyz"}, 0)
+	if err == nil {
+		t.Fatalf("expected a start error, got exit=%d stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if exit != 0 {
+		t.Fatalf("start failure should keep exit 0 with a non-nil error, got exit=%d", exit)
+	}
+}
+
+func TestCommandGateDoesNotPassOnMissingBinary(t *testing.T) {
+	eng := New(t.TempDir())
+	n := node("command", &graph.Verification{Kind: "command", Command: []string{"definitely-not-a-real-binary-xyz"}})
+	res, err := eng.Verify(context.Background(), n, "", 1, msgsWithDiff())
+	if err == nil {
+		t.Fatalf("gate returned no error but the command never ran: %+v", res)
+	}
+	if res.Pass {
+		t.Fatal("gate passed even though the verification command could not be started")
+	}
+}
