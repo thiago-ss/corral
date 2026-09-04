@@ -39,11 +39,21 @@ event log, so a crash resumes instead of restarting.
 
 ### Highlights
 
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/bench-dark.svg"><img src="docs/assets/bench-light.svg" alt="Three measured benchmark results. Left: wall time for 8 tasks falls from 81 ticks at 1 worker to 11 at 8 workers. Middle: after a crash at 50 percent, a naive re-run costs 81 ticks against 11 to resume. Right: all 10 agents reported success and the evidence gates rejected 3 of them." width="900"></picture>
+</p>
+
+<p align="center"><sub>Regenerate with <code>go run ./cmd/bench | python3 scripts/make_bench_figure.py</code> · <a href="#benchmarks">full tables below</a></sub></p>
+
 - 🔀 **Actually parallel** — leased workers, each in its own branch and worktree. [7.4× faster](#benchmarks) at 8 workers, 92% scaling efficiency.
-- 🔒 **Evidence, not vibes** — a node completes when a command, schema, diff, or reviewer says so. Prose alone fails the gate.
-- 💾 **Crash-durable** — completed nodes stay done. Interrupted attempts restart; a resumed run skips finished work.
+- 🔒 **Evidence, not vibes** — a node completes when a command, schema, diff, or reviewer says so. Prose alone fails the gate. In the simulation above, that catches 3 of 10 agents that all claimed success.
+- 💾 **Crash-durable** — completed nodes stay done. A run killed halfway resumes in 11 ticks where a naive re-run costs 81.
 - 🎛️ **You hold the merge** — approval is an explicit graph node before a `--no-ff` merge. Nothing lands unwatched.
 - 📼 **Full provenance** — ordered events, attempts, verdicts, branches, and artifacts for every run, exportable as an audit trail.
+
+> The two claims above with no bar next to them — operator approval and
+> provenance — are structural properties, not measurements. They are stated as
+> plainly as they can be, and deliberately not charted.
 
 ## Table of contents
 
