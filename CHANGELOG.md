@@ -18,9 +18,15 @@ All notable changes are documented here. Dates use ISO 8601 format.
   worktrees and safe pruning of merged or stale clean worktrees.
 - Workflow diagrams and a visual trust-loop/brand system in `docs/` and the
   repository root.
+- Concurrency-scaling sweep in `cmd/bench`: the 8-task graph is now measured at
+  1, 2, 4, and 8 workers, reporting ticks, speedup, and scaling efficiency.
 
 ### Changed
 
+- README restructured around the conventions of high-traffic CLI project
+  READMEs: product screenshot above the fold, scannable highlights, table of
+  contents, comparison and executor-status tables, benchmark tables, an
+  alternatives section, and a star-history chart.
 - Agent authorization is now fail-closed. Managed OpenCode roles refresh on
   `corral init`, worktree sessions receive the managed policy, and provider
   prompts select the role-specific agent.
